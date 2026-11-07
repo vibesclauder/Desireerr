@@ -368,28 +368,11 @@ class Favourites(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_new_favourite_is_followed_from_today(self):
-        out = self.app.set_favorite("performer", SCENE, True)
-        self.assertEqual(self.favs, [("performer", SCENE, True)])
-        self.assertTrue(out["is_favorite"])
-        self.assertEqual((self.posted[0]["afterDate"], self.posted[0]["monitored"]), (d.today(), True))
-
-    def test_already_followed_is_left_alone(self):
-        self.app.whisparr.routes[("GET", "performer")] = [{"id": 3, "foreignId": SCENE, "monitored": True,
-                                                           "afterDate": "2026-10-30"}]
-        out = self.app.set_favorite("performer", SCENE, True)
-        self.assertEqual(out["follow"], {"followed": True, "since": "2026-10-30"})
-        self.assertEqual(self.posted, [])
-
-    def test_unfavourite_leaves_whisparr(self):
-        self.app.set_favorite("performer", SCENE, False)
-        self.assertEqual(self.favs, [("performer", SCENE, False)])
-        self.assertEqual(self.app.whisparr.calls, [])
-
-    def test_whisparr_trouble_does_not_undo_the_favourite(self):
-        self.app.whisparr.routes[("GET", "performer")] = lambda b, p: (_ for _ in ()).throw(d.ApiError(502, "down"))
-        out = self.app.set_favorite("performer", SCENE, True)
-        self.assertEqual((out["is_favorite"], out["follow_error"]), (True, "down"))
+    def test_favourites_only_touch_stashdb(self):
+        self.assertEqual(self.app.set_favorite("performer", SCENE, True), {"is_favorite": True})
+        self.app.set_favorite("studio", SCENE, False)
+        self.assertEqual(self.favs, [("performer", SCENE, True), ("studio", SCENE, False)])
+        self.assertEqual(self.app.whisparr.calls, [])     # nothing followed, nothing wanted
 
 
 class Images(unittest.TestCase):

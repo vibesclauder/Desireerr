@@ -489,9 +489,8 @@ document.addEventListener("click", async (e) => {
       afterChange(null, null);
     } else if (act === "favorite") {
       const fav = b.dataset.favorite === "1";
-      const r = await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
-      if (r.follow_error) toast(`Favourite saved on StashDB, but Whisparr: ${r.follow_error}`, true);
-      else toast(fav ? "Added to your StashDB favourites. Whisparr follows new scenes from today on." : "Removed from your StashDB favourites.");
+      await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
+      toast(fav ? "Added to your StashDB favourites. Nothing is downloaded for it; use them as a filter." : "Removed from your StashDB favourites.");
       render();
     } else if (act === "follow") {
       const follow = b.dataset.follow === "1";
@@ -1050,7 +1049,7 @@ function favoriteButton(kind, item) {
   if (!me.is_admin) return "";
   return item.is_favorite
     ? html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="0" title="Remove from your StashDB favourites">${icon("heartFill")}Favourite</button>`
-    : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="Add to your StashDB favourites; Whisparr then follows new scenes from today on">${icon("heart")}Add to favourites</button>`;
+    : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="Add to your StashDB favourites: a filter on Discover, Scenes and the lists. Nothing is downloaded for it.">${icon("heart")}Add to favourites</button>`;
 }
 
 function followButton(kind, item) {

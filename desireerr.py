@@ -1539,20 +1539,11 @@ class App:
         return found
 
     def set_favorite(self, kind, sid, favorite):
-        """Favourite on StashDB; a new favourite is also followed in Whisparr from today on.
-
-        Whisparr's StashDB import list adds favourites by itself, and with no "after" date it
-        would want their whole back catalogue; followed first (after date today), only new
-        scenes are wanted. Unfavouring leaves the follow as it is (Unfollow does that)."""
+        """Favourite (or not) on StashDB only: a filter for Discover, Scenes and the lists.
+        Whisparr isn't touched, so nothing is downloaded for it (Follow does that). Should
+        Whisparr's StashDB import list be on, it adds favourites by itself."""
         self.stash.set_favorite(kind, sid, favorite)
-        out = {"is_favorite": bool(favorite)}
-        if favorite:
-            try:
-                state = self.whisparr.follow_state(kind, sid)
-                out["follow"] = state if state["followed"] else self.whisparr.set_follow(kind, sid, True)
-            except ApiError as e:
-                out["follow_error"] = e.message
-        return out
+        return {"is_favorite": bool(favorite)}
 
     # -- saved searches ---------------------------------------------------------------
     # A saved search is the Scenes page's filters plus a date: every hour, scenes released
@@ -2049,8 +2040,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(404, "StashDB has no tag with that ID.")
             return 200, tag, None
 
-        # -- favourites (admins: they're the StashDB account's, and Whisparr's StashDB
-        #    import list follows them) --
+        # -- favourites (admins: they're the StashDB account's) --
         if key == ("POST", "favorite"):
             admin()
             body = self.body_json()

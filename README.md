@@ -11,8 +11,8 @@ or available.
   a plain JavaScript single-page app with no build step.
 - **Everything is behind the login.** Covers are fetched through the server and cached, so
   the browser only talks to Desireerr. Covers can be blurred, and the tab title is a setting.
-- **Users and approvals.** Admins approve requests, follow performers and studios, and
-  change settings. Other users' requests wait for approval unless they're auto-approved.
+- **Users and approvals.** Admins approve requests, follow performers and studios, set
+  favourites and change settings. Other users' requests wait for approval unless they're auto-approved.
 - **Saved searches.** Any filter on the Scenes page (tags in and out, performers, studios,
   favourites) can request its new scenes every hour, which Whisparr's follows can't.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
@@ -74,6 +74,11 @@ On a phone, open it and "Add to home screen" for an app icon.
   performer's back catalogue), it's monitored; otherwise it's added by its StashDB ID with the
   quality profile and folder from Settings. Then Whisparr searches for it right away, unless
   that's switched off in Settings (then only the RSS feed can grab it).
+- **Favourite a performer or studio** (admins, the heart): saved on your StashDB account, and
+  nothing else. Favourites are a filter: Discover's "New from your StashDB favourites", the
+  Scenes page's Favourites filter, "favourites only" on Performers and Studios, and saved
+  searches. Nothing is downloaded for them. (Whisparr's own StashDB import list, if you
+  switch it on, does add favourites to Whisparr, with their whole back catalogue.)
 - **Follow a performer or studio** (admins): monitored in Whisparr with the "after" date set to
   today, so only new scenes are wanted. Without a date Whisparr would want the whole back
   catalogue. Older scenes can still be requested one by one.
