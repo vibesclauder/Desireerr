@@ -48,8 +48,13 @@ class FakeStash:
         start = (inp["page"] - 1) * inp["per_page"]
         return {"count": len(self.listed), "scenes": self.listed[start:start + inp["per_page"]]}
 
+    tags = {}                 # scene id -> its tag ids (for the checks StashDB can't take)
+
     def find_many(self, field, ids, selection, fragments="", ttl=300):
-        return [{"id": i, "tags": []} for i in ids]   # no scene has a left-out tag
+        return [{"id": i, "tags": [{"id": t} for t in self.tags.get(i, [])]} for i in ids]
+
+    def find_tag(self, tid):
+        return {"id": tid, "name": f"Tag {tid[-1]}"} if tid.startswith("aaaaaaaa") else None
 
 
 SCENE = "11111111-2222-3333-4444-555555555555"
@@ -475,6 +480,13 @@ class Http(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/watches")[1]["watches"], [])
         self.assertEqual(self.req("DELETE", f"/api/watches/{w['id']}")[0], 404)
 
+    def test_favourite_tags_over_http(self):
+        self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
+        status, out = self.req("POST", "/api/favorite-tags", {"id": TAG, "favorite": True})
+        self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1"}]))
+        self.assertEqual(self.req("GET", "/api/status")[1]["fav_tags"], [{"id": TAG, "name": "Tag 1"}])
+        self.assertEqual(self.req("POST", "/api/favorite-tags", {"id": "x\" evil"})[0], 400)
+
     def test_status_remembers_where_the_app_is_opened(self):
         self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
         self.req("GET", "/api/status")
@@ -837,6 +849,56 @@ class SettingsChecks(Base):
         conn.close()
         cols = {r["name"] for r in d.DB(path).all("PRAGMA table_info(requests)")}
         self.assertTrue({"via", "watch_id", "notified", "searched_at"} <= cols)
+
+
+class FavouriteTags(Base):
+    def setUp(self):
+        super().setUp()
+        self.app.stash.tags = {SCENE: [TAG], OTHER: [TAG2]}
+        self.app.stash.listed = [card(SCENE, "2026-11-07T10:00:00Z"), card(OTHER, "2026-11-06T10:00:00Z")]
+
+    def test_per_user_with_stashdb_names(self):
+        self.assertEqual(self.app.set_fav_tag(self.user, TAG, True), [{"id": TAG, "name": "Tag 1"}])
+        self.app.set_fav_tag(self.user, TAG, True)           # twice is fine
+        self.assertEqual(self.app.fav_tags(self.admin), [])
+        self.assertEqual(self.app.set_fav_tag(self.user, TAG, False), [])
+        with self.assertRaises(d.ApiError):
+            self.app.set_fav_tag(self.user, "bbbbbbbb-0000-0000-0000-000000000000", True)
+
+    def test_plan(self):
+        favs = [TAG, TAG2]
+        plan = self.app.tag_plan
+        self.assertEqual(plan({"fav_tags": "1"}, favs), ({"value": favs, "modifier": "INCLUDES"}, [], [], []))
+        # Favourites go to StashDB; the picked tags are checked here.
+        self.assertEqual(plan({"fav_tags": "1", "tags": SCENE, "not_tags": OTHER}, favs),
+                         ({"value": favs, "modifier": "INCLUDES"}, [], [SCENE], [OTHER]))
+        self.assertEqual(plan({"fav_tags": "1", "tags": SCENE, "tag_mode": "any"}, favs)[1:3], ([SCENE], []))
+        # One favourite and all picked tags: one exact criterion.
+        self.assertEqual(plan({"fav_tags": "1", "tags": SCENE}, [TAG]),
+                         ({"value": [SCENE, TAG], "modifier": "INCLUDES_ALL"}, [], [], []))
+        self.assertEqual(plan({"tags": SCENE}, favs)[0]["value"], [SCENE])   # not asked for
+
+    def test_browse_with_favourite_tags(self):
+        self.assertEqual(self.app.browse_scenes({"fav_tags": "1"}, self.user)["scenes"], [])   # none yet
+        self.assertEqual(self.app.stash.queries, [])
+        self.app.set_fav_tag(self.user, TAG, True)
+        self.app.browse_scenes({"fav_tags": "1"}, self.user)
+        self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG], "modifier": "INCLUDES"})
+        self.app.set_fav_tag(self.user, TAG2, True)
+        out = self.app.browse_scenes({"fav_tags": "1", "tags": TAG}, self.user)
+        self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG, TAG2], "modifier": "INCLUDES"})
+        self.assertEqual([x["id"] for x in out["scenes"]], [SCENE])        # OTHER lacks the picked TAG
+
+    def test_saved_search_follows_the_favourites(self):
+        w = self.app.save_watch(self.admin, {"name": "Favs", "query": "fav_tags=1", "since": "2026-11-01"})
+        self.assertEqual(self.app.check_watch(w["id"])["found"], 0)          # no favourites yet
+        self.app.set_fav_tag(self.admin, TAG, True)
+        self.app.stash.listed = self.app.stash.listed[:1]   # what StashDB answers for TAG
+        self.assertEqual(self.app.check_watch(w["id"])["requested"], 1)
+        self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG], "modifier": "INCLUDES"})
+        self.app.db.run("UPDATE watches SET cursor = 'x'")
+        self.app.set_fav_tag(self.admin, TAG2, True)                         # looks again
+        self.assertEqual(self.app.db.one("SELECT cursor FROM watches")["cursor"], "")
 
 
 if __name__ == "__main__":

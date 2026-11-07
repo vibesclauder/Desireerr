@@ -206,6 +206,8 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--line); font-size: 13px; color: var(--fg-2); white-space: nowrap; }
 a.chip:hover, button.chip:hover { border-color: var(--accent-hi); color: var(--fg); }
 button.chip { cursor: pointer; }
+.chip.fav { border-color: rgba(251,113,133,.55); }
+.chip.fav svg { width: 12px; height: 12px; color: var(--accent); }
 .chip.inc { background: rgba(225,29,72,.16); border-color: rgba(251,113,133,.55); color: #ffe4e6; }
 .chip.exc { background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.4); color: #fca5a5; text-decoration: line-through; text-decoration-color: rgba(252,165,165,.6); }
 .chip .x { width: 16px; height: 16px; border-radius: 99px; display: grid; place-items: center; background: rgba(255,255,255,.08); cursor: pointer; border: 0; padding: 0; }

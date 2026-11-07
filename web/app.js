@@ -114,6 +114,9 @@ function fmtAgo(ts) {
 }
 const titleCase = (s) => (s || "").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const performerName = (p) => p.as || p.performer?.name || "";
+// Favourite tags are Desireerr's own (StashDB has none), per user; status carries them.
+const isFavTag = (id) => (status.fav_tags || []).some((t) => t.id === id);
+const tagChip = (t, extra = "") => html`<a class="chip ${isFavTag(t.id) ? "fav" : ""}" href="/tag/${t.id}" title="${t.description || ""}">${isFavTag(t.id) ? icon("heartFill") : ""}${t.name}${extra}</a>`;
 
 // ---------------------------------------------------------------------------------------
 // Icons
@@ -487,6 +490,12 @@ document.addEventListener("click", async (e) => {
       const r = await api("requests/search-stalled", { method: "POST" });
       toast(`Whisparr is searching again for ${r.searched} request${r.searched === 1 ? "" : "s"}.`);
       afterChange(null, null);
+    } else if (act === "favtag") {
+      const fav = b.dataset.favorite === "1";
+      await api("favorite-tags", { method: "POST", body: { id: b.dataset.id, favorite: fav } });
+      toast(fav ? "Added to your favourite tags. Use them as a filter; nothing is downloaded for them." : "Removed from your favourite tags.");
+      await refreshStatus();
+      render();
     } else if (act === "favorite") {
       const fav = b.dataset.favorite === "1";
       await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
@@ -601,6 +610,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     tags: (params.get("tags") ?? defaults.tags ?? "").split(",").filter(Boolean),
     tag_mode: params.get("tag_mode") || "all",
     not_tags: (params.get("not_tags") || "").split(",").filter(Boolean),
+    fav_tags: params.get("fav_tags") || "",
     performers: (params.get("performers") || "").split(",").filter(Boolean),
     studios: (params.get("studios") || "").split(",").filter(Boolean),
     sub_studios: params.get("sub_studios") ?? defaults.sub_studios ?? "",
@@ -616,7 +626,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
   // The chips' names, for a saved search's name and summary.
   const labels = { tags: named(f.tags, "tags"), not_tags: named(f.not_tags, "tags"), performers: named(f.performers, "performers"), studios: named(f.studios, "studios") };
 
-  const activeCount = () => [f.q, f.tags.length, f.not_tags.length, f.performers.length, f.studios.length, f.after, f.before, f.favorites, f.hide_have].filter(Boolean).length;
+  const activeCount = () => [f.q, f.tags.length, f.fav_tags, f.not_tags.length, f.performers.length, f.studios.length, f.after, f.before, f.favorites, f.hide_have].filter(Boolean).length;
   el.innerHTML = html`
     <details class="filters">
       ${filterSummary(activeCount())}
@@ -635,6 +645,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
         <div class="field"><span>Match</span><div class="seg" id="f-mode"><button type="button" data-v="all" class="${f.tag_mode === "all" ? "on" : ""}">All tags</button><button type="button" data-v="any" class="${f.tag_mode === "any" ? "on" : ""}">Any tag</button></div></div>
         <div class="field grow"><span>Without tags</span><div id="f-not"></div></div>
       </div>
+      ${status.fav_tags?.length || f.fav_tags ? html`<div class="filter-row"><label class="check"><input type="checkbox" id="f-favtags" ${f.fav_tags ? "checked" : ""}> With any of my favourite tags${status.fav_tags?.length ? ` (${status.fav_tags.map((t) => t.name).join(", ")})` : " (none yet: add some on a tag's page)"}</label></div>` : ""}
       <div class="filter-row">
         ${hide.includes("performers") ? "" : html`<div class="field grow"><span>${fixed.performers ? "Also with" : "Performers"}</span><div id="f-perf"></div></div>`}
         ${hide.includes("studios") ? "" : html`<div class="field grow"><span>Studios</span><div id="f-studio"></div></div>`}
@@ -664,7 +675,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
       q: f.q, sort: f.sort !== (defaults.sort || "DATE") || f.dir !== (defaults.dir || "desc") ? f.sort : "",
       dir: f.dir !== (defaults.dir || "desc") || f.sort !== (defaults.sort || "DATE") ? f.dir : "",
       tags: f.tags.join(",") !== (defaults.tags || "") ? (f.tags.length ? f.tags : "-") : "",
-      tag_mode: f.tag_mode !== "all" ? f.tag_mode : "", not_tags: f.not_tags,
+      tag_mode: f.tag_mode !== "all" ? f.tag_mode : "", not_tags: f.not_tags, fav_tags: f.fav_tags,
       performers: f.performers, studios: f.studios,
       sub_studios: fixed.studios ? (f.sub_studios ? "1" : "0") : "",
       after: f.after, before: f.before, favorites: f.favorites, hide_have: f.hide_have,
@@ -684,6 +695,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
   $("#f-after", el).onchange = (e) => { f.after = e.target.value; if (f.after) { f.before = ""; $("#f-before", el).value = ""; } sync(); };
   $("#f-before", el).onchange = (e) => { f.before = e.target.value; if (f.before) { f.after = ""; $("#f-after", el).value = ""; } sync(); };
   $("#f-hide", el).onchange = (e) => { f.hide_have = e.target.checked ? "1" : ""; sync(); };
+  if ($("#f-favtags", el)) $("#f-favtags", el).onchange = (e) => { f.fav_tags = e.target.checked ? "1" : ""; sync(); };
   if ($("#f-sub", el)) $("#f-sub", el).onchange = (e) => { f.sub_studios = e.target.checked ? "1" : ""; sync(); };
   $("#f-mode", el).onclick = (e) => {
     const b = e.target.closest("[data-v]");
@@ -702,6 +714,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     const studios = fixedNames.studios || labels.studios;
     const parts = [];
     if (labels.tags.length) parts.push(nm(labels.tags).join(f.tag_mode === "any" ? " or " : " + "));
+    if (f.fav_tags) parts.push("my favourite tags");
     if (perf.length) parts.push(nm(perf).join(" & "));
     if (studios.length) parts.push(nm(studios).join(" or ") + (fixed.studios && f.sub_studios ? " (with sub-studios)" : ""));
     if (f.favorites) parts.push({ ALL: "StashDB favourites", PERFORMER: "Favourite performers", STUDIO: "Favourite studios" }[f.favorites]);
@@ -710,14 +723,14 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     return parts.join(" · ");
   };
   const watchQuery = () => qs(Object.fromEntries(Object.entries({
-    q: f.q, tags: f.tags, tag_mode: f.tags.length > 1 && f.tag_mode !== "all" ? f.tag_mode : "", not_tags: f.not_tags,
+    q: f.q, tags: f.tags, tag_mode: f.tags.length > 1 && f.tag_mode !== "all" ? f.tag_mode : "", not_tags: f.not_tags, fav_tags: f.fav_tags,
     performers: performers(), performer_mode: performers().length > 1 ? "all" : "",
     studios: fixed.studios || f.studios, sub_studios: fixed.studios && f.sub_studios ? "1" : "", favorites: f.favorites,
   }).filter(([, v]) => !(Array.isArray(v) && !v.length)))).slice(1);
   const saveForm = $("#f-saveform", el);
   $("#f-save", el).onclick = () => {
     if (!saveForm.hidden) { saveForm.hidden = true; return; }
-    if (!(f.q || f.tags.length || performers().length || (fixed.studios || f.studios).length || f.favorites)) {
+    if (!(f.q || f.tags.length || f.fav_tags || performers().length || (fixed.studios || f.studios).length || f.favorites)) {
       return toast("Pick a tag, performer, studio or favourites first. Without one, a saved search would request every new scene.", true);
     }
     saveForm.wname.value = describe().slice(0, 80);
@@ -748,7 +761,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     try {
       const res = await api("scenes" + qs({
         q: f.q, sort: f.sort, dir: f.dir,
-        tags: f.tags, tag_mode: f.tag_mode, not_tags: f.not_tags,
+        tags: f.tags, tag_mode: f.tag_mode, not_tags: f.not_tags, fav_tags: f.fav_tags,
         performers: [...(fixed.performers || []), ...f.performers.filter((p) => !(fixed.performers || []).includes(p))],
         performer_mode: "all",
         studios: fixed.studios || f.studios, sub_studios: fixed.studios && f.sub_studios ? "1" : "",
@@ -954,10 +967,11 @@ async function viewDiscover(view, ctx) {
     const r = rows[key];
     if (!r) return;
     if (r.error) parts.push(html`<section class="section"><div class="section-head"><h2>${r.title}</h2></div>${errorBox(new Error(r.error))}</section>`);
-    else if (r.scenes.length || key !== "favorites") parts.push(slider(r.title, r.scenes, "scenes", r.link, sceneCard));
+    else if (r.scenes.length || !["favorites", "favtags"].includes(key)) parts.push(slider(r.title, r.scenes, "scenes", r.link, sceneCard));
   };
   sceneRow("trending");
   sceneRow("favorites");
+  sceneRow("favtags");
   if (d.followed?.performers?.length) parts.push(slider("Performers you follow", d.followed.performers.map((p) => ({ ...p, followed: true })), "people", null, personCard));
   sceneRow("added");
   sceneRow("new");
@@ -1037,7 +1051,7 @@ async function viewScene(view, id, ctx) {
           })}</div></section>` : ""}
         ${s.details ? html`<section class="section"><div class="section-head"><h2>About</h2></div><p class="prose">${s.details}</p></section>` : ""}
         ${s.tags?.length ? html`<section class="section"><div class="section-head"><h2>Tags</h2>${similar.length ? html`<a class="more" href="/scenes${qs({ tags: similar, sort: "POPULARITY" })}">More like this${icon("chevron")}</a>` : ""}</div>
-          <div class="tag-groups">${Object.entries(groups).sort(([a], [b]) => (a === "Other") - (b === "Other") || a.localeCompare(b)).map(([cat, ts]) => html`<div class="tag-group"><h3>${cat}</h3><div class="chips">${ts.map((t) => html`<a class="chip" href="/tag/${t.id}" title="${t.description || ""}">${t.name}</a>`)}</div></div>`)}</div></section>` : ""}
+          <div class="tag-groups">${Object.entries(groups).sort(([a], [b]) => (a === "Other") - (b === "Other") || a.localeCompare(b)).map(([cat, ts]) => html`<div class="tag-group"><h3>${cat}</h3><div class="chips">${ts.map((t) => tagChip(t))}</div></div>`)}</div></section>` : ""}
       </div>
       <aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>
     </div>
@@ -1143,7 +1157,10 @@ async function viewTag(view, id, ctx) {
   document.title = t.name;
   view.innerHTML = html`<div class="page">
     <div class="section" style="gap:8px">
-      <div class="page-title"><h1>${t.name}</h1>${t.category ? html`<a class="chip" href="/tags#cat-${t.category.id}">${t.category.name}</a>` : ""}</div>
+      <div class="page-title"><h1>${t.name}</h1>${t.category ? html`<a class="chip" href="/tags#cat-${t.category.id}">${t.category.name}</a>` : ""}
+        ${t.is_favorite
+          ? html`<button class="btn small" data-act="favtag" data-id="${t.id}" data-favorite="0" title="Remove from your favourite tags">${icon("heartFill")}Favourite</button>`
+          : html`<button class="btn small" data-act="favtag" data-id="${t.id}" data-favorite="1" title="Your favourite tags: a filter on Discover and Scenes, and for saved searches. Nothing is downloaded for them.">${icon("heart")}Add to favourites</button>`}</div>
       ${t.description ? html`<p class="prose" style="margin:0">${t.description}</p>` : ""}
       ${t.aliases?.length ? html`<div class="note">Also called: ${t.aliases.join(", ")}</div>` : ""}
       <div class="note">Add more tags below to narrow it down, or leave some out.</div>
@@ -1161,6 +1178,8 @@ async function viewTags(view, ctx) {
   for (const c of categories) (byGroup[c.group] ||= []).push(c);
   view.innerHTML = html`<div class="page">
     <div class="page-title"><h1>Tags</h1><span class="sub">Pick a tag to see its scenes, then add more tags to combine them.</span></div>
+    ${status.fav_tags?.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>Your favourite tags</h2><a class="more" href="/scenes?fav_tags=1">Scenes with any of them${icon("chevron")}</a></div>
+      <div class="chips">${status.fav_tags.map((t) => tagChip(t))}</div></section>` : ""}
     <div class="filters">
       <div class="filter-row"><label class="field grow"><span>Find a tag</span><input class="input" id="t-q" type="search" placeholder="Tag name or alias" autocomplete="off"></label></div>
       <div class="chips" id="t-hits"></div>
@@ -1175,7 +1194,7 @@ async function viewTags(view, ctx) {
     if (q.length < 2) { hits.innerHTML = ""; return; }
     try {
       const { tags } = await api("tags" + qs({ q }));
-      hits.innerHTML = tags.length ? tags.map((t) => html`<a class="chip" href="/tag/${t.id}">${t.name}${t.category ? html` <small style="color:var(--muted)">${t.category.name}</small>` : ""}</a>`.s).join("") : html`<span class="note">No tags match.</span>`.s;
+      hits.innerHTML = tags.length ? tags.map((t) => tagChip(t, t.category ? html` <small style="color:var(--muted)">${t.category.name}</small>` : "").s).join("") : html`<span class="note">No tags match.</span>`.s;
     } catch (err) { hits.innerHTML = html`<span class="note bad-text">${err.message}</span>`.s; }
   }, 250));
   const open = async (cat) => {
@@ -1192,7 +1211,7 @@ async function viewTags(view, ctx) {
         all = all.concat(res.tags); count = res.count; page++;
       } while (all.length < count && page <= 10);
       body.dataset.loaded = "1";
-      body.innerHTML = html`<div class="chips">${all.map((t) => html`<a class="chip" href="/tag/${t.id}" title="${t.description || ""}">${t.name}</a>`)}</div>`.s;
+      body.innerHTML = html`<div class="chips">${all.map((t) => tagChip(t))}</div>`.s;
     } catch (err) { body.innerHTML = html`<span class="note bad-text">${err.message}</span>`.s; }
   };
   $(".page", view).addEventListener("click", (e) => { const b = e.target.closest(".cat > button"); if (b) open(b.parentElement); });
@@ -1290,7 +1309,7 @@ async function viewSearch(view, ctx) {
   view.innerHTML = html`<div class="page">
     <div class="page-title"><h1>Results for “${q}”</h1></div>
     ${none ? html`<div class="empty">Nothing on StashDB matches that.</div>` : ""}
-    ${r.tags.length ? html`<section class="section"><div class="section-head"><h2>Tags</h2></div><div class="chips">${r.tags.map((t) => html`<a class="chip" href="/tag/${t.id}">${t.name}</a>`)}</div></section>` : ""}
+    ${r.tags.length ? html`<section class="section"><div class="section-head"><h2>Tags</h2></div><div class="chips">${r.tags.map((t) => tagChip(t))}</div></section>` : ""}
     ${r.performers.length ? slider("Performers", r.performers, "people", `/performers${qs({ q })}`, personCard) : ""}
     ${r.studios.length ? slider("Studios", r.studios, "people", `/studios${qs({ q })}`, studioCard) : ""}
     ${r.scenes.length ? html`<section class="section"><div class="section-head"><h2>Scenes</h2><a class="more" href="/scenes${qs({ q })}">Search titles only${icon("chevron")}</a></div><div class="grid scenes">${r.scenes.map(sceneCard)}</div></section>` : ""}

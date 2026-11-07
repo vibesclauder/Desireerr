@@ -226,6 +226,13 @@ CREATE TABLE IF NOT EXISTS watches (
     cursor TEXT NOT NULL DEFAULT '', -- the newest StashDB "updated" time seen
     error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS favorite_tags (   -- StashDB has no tag favourites: ours, per user
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tag_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    PRIMARY KEY (user_id, tag_id)
+);
 CREATE TABLE IF NOT EXISTS watch_scenes (
     watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
     scene_id TEXT NOT NULL,
@@ -1343,7 +1350,30 @@ class App:
         return self.db.one("SELECT COUNT(*) AS n FROM requests WHERE status = 'pending'")["n"]
 
     # -- browsing -----------------------------------------------------------------------
-    def scene_input(self, q):
+    @staticmethod
+    def tag_plan(q, favs=()):
+        """How a query's tags are matched: (the one tags criterion StashDB takes, tags of which
+        a scene needs one, tags it needs all of, tags it mustn't have), the last three checked
+        here. fav_tags=1 means any of the user's favourite tags (favs).
+
+        Favourites go to StashDB (likely the narrower part) and picked tags are checked here,
+        except with one favourite and all picked tags wanted: one exact criterion then."""
+        tags, not_tags = id_list(q.get("tags")), id_list(q.get("not_tags"))
+        mode = TAG_MODES.get(q.get("tag_mode"), "INCLUDES_ALL")
+        favs = list(favs) if q.get("fav_tags") == "1" else []
+        if favs and tags:
+            if len(favs) == 1 and mode == "INCLUDES_ALL":
+                return {"value": list(dict.fromkeys(tags + favs)), "modifier": mode}, [], [], not_tags
+            any_, all_ = (tags, []) if mode == "INCLUDES" else ([], tags)
+            return {"value": favs, "modifier": "INCLUDES"}, any_, all_, not_tags
+        if tags or favs:
+            return ({"value": tags, "modifier": mode} if tags else
+                    {"value": favs, "modifier": "INCLUDES"}), [], [], not_tags
+        if not_tags:
+            return {"value": not_tags, "modifier": "EXCLUDES"}, [], [], []
+        return None, [], [], []
+
+    def scene_input(self, q, favs=()):
         """Build a SceneQueryInput from URL parameters (the Scenes page's filters)."""
         inp = {
             "page": clamp_int(q.get("page"), 1, 1, 10000),
@@ -1353,14 +1383,10 @@ class App:
         }
         if q.get("q"):
             inp["title"] = q["q"][:200]
-        tags = id_list(q.get("tags"))
-        not_tags = id_list(q.get("not_tags"))
-        # StashDB takes one tags criterion per query. With both included and excluded tags,
-        # the included ones go to StashDB and browse_scenes drops the excluded ones.
-        if tags:
-            inp["tags"] = {"value": tags, "modifier": TAG_MODES.get(q.get("tag_mode"), "INCLUDES_ALL")}
-        elif not_tags:
-            inp["tags"] = {"value": not_tags, "modifier": "EXCLUDES"}
+        # StashDB takes one tags criterion per query; filtered_scenes checks the rest.
+        criterion = self.tag_plan(q, favs)[0]
+        if criterion:
+            inp["tags"] = criterion
         performers = id_list(q.get("performers"))
         if performers:
             inp["performers"] = {"value": performers,
@@ -1379,23 +1405,55 @@ class App:
             inp["favorites"] = q["favorites"]
         return inp
 
-    def browse_scenes(self, q):
-        inp = self.scene_input(q)
-        result, scenes = self.filtered_scenes(q, inp)
+    def browse_scenes(self, q, user=None):
+        favs = self.fav_tag_ids(user) if user else []
+        inp = self.scene_input(q, favs)
+        if q.get("fav_tags") == "1" and not favs:
+            return {"count": 0, "scenes": [], "page": inp["page"], "per_page": inp["per_page"]}
+        result, scenes = self.filtered_scenes(q, inp, favs)
         return {"count": result["count"], "scenes": self.annotate(scenes), "page": inp["page"],
                 "per_page": inp["per_page"]}
 
-    def filtered_scenes(self, q, inp, ttl=300):
-        """StashDB's answer to a scene query, and its scenes without the left-out tags."""
+    def filtered_scenes(self, q, inp, favs=(), ttl=300):
+        """StashDB's answer to a scene query, and its scenes that pass the tag checks StashDB
+        couldn't take (see tag_plan)."""
         result = self.stash.query_scenes(inp, ttl)
         scenes = result["scenes"]
-        not_tags = set(id_list(q.get("not_tags")))
-        if not_tags and inp.get("tags", {}).get("modifier") != "EXCLUDES":
-            # Exclusions next to inclusions are applied here, so a page can come back
-            # short. The scene cards carry no tags, so fetch them.
-            full = self.scene_tags([s["id"] for s in scenes])
-            scenes = [s for s in scenes if not (set(full.get(s["id"], [])) & not_tags)]
+        _, need_one, need_all, not_tags = self.tag_plan(q, favs)
+        if need_one or need_all or not_tags:
+            # So a page can come back short. The scene cards carry no tags: fetch them.
+            full = {sid: set(t) for sid, t in self.scene_tags([s["id"] for s in scenes]).items()}
+            need_one, need_all, not_tags = set(need_one), set(need_all), set(not_tags)
+
+            def ok(sc):
+                have = full.get(sc["id"], set())
+                return ((not need_one or have & need_one) and need_all <= have
+                        and not have & not_tags)
+            scenes = [sc for sc in scenes if ok(sc)]
         return result, scenes
+
+    # -- favourite tags (Desireerr's own, per user) ------------------------------------
+    def fav_tags(self, user):
+        return self.db.all("SELECT tag_id AS id, name FROM favorite_tags WHERE user_id = ? "
+                           "ORDER BY name COLLATE NOCASE", (user["id"],))
+
+    def fav_tag_ids(self, user):
+        return [t["id"] for t in self.fav_tags(user)]
+
+    def set_fav_tag(self, user, tag_id, favorite):
+        if favorite:
+            tag = self.stash.find_tag(tag_id)
+            if not tag:
+                raise ApiError(404, "StashDB has no tag with that ID.")
+            self.db.run("INSERT OR IGNORE INTO favorite_tags(user_id, tag_id, name, created) "
+                        "VALUES (?,?,?,?)", (user["id"], tag_id, tag["name"], now()))
+        else:
+            self.db.run("DELETE FROM favorite_tags WHERE user_id = ? AND tag_id = ?",
+                        (user["id"], tag_id))
+        # Their saved searches with favourite tags look through the matches again.
+        self.db.run("UPDATE watches SET cursor = '' WHERE user_id = ? AND query LIKE '%fav_tags=1%'",
+                    (user["id"],))
+        return self.fav_tags(user)
 
     def scene_tags(self, ids):
         found = self.stash.find_many("findScene", ids, "{ id tags { id } }")
@@ -1409,6 +1467,7 @@ class App:
         return out
 
     def discover(self, user):
+        favs = self.fav_tag_ids(user)
         specs = [
             ("trending", "Trending", lambda: self.stash.query_scenes(
                 {"page": 1, "per_page": 20, "sort": "TRENDING", "direction": "DESC"})["scenes"],
@@ -1417,6 +1476,11 @@ class App:
                 {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC", "favorites": "ALL",
                  "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
              "/scenes?favorites=ALL"),
+            ("favtags", "New with your favourite tags", lambda: self.stash.query_scenes(
+                {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
+                 "tags": {"value": favs, "modifier": "INCLUDES"},
+                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"] if favs else [],
+             "/scenes?fav_tags=1"),
             ("added", "Recently added", self.recent_library, None),
             ("new", "New releases", lambda: self.stash.query_scenes(
                 {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
@@ -1550,12 +1614,12 @@ class App:
     # since then that match (also older ones newly tagged to match) are requested as their
     # owner, so the usual approval applies, or always left pending with "ask first".
 
-    WATCH_FILTERS = ("q", "tags", "tag_mode", "not_tags", "performers", "performer_mode",
-                     "studios", "sub_studios", "favorites")
+    WATCH_FILTERS = ("q", "tags", "tag_mode", "not_tags", "fav_tags", "performers",
+                     "performer_mode", "studios", "sub_studios", "favorites")
 
     def watch_query(self, query):
         q = {k: v for k, v in urllib.parse.parse_qsl(str(query or "")) if k in self.WATCH_FILTERS}
-        if not (q.get("q") or id_list(q.get("tags")) or id_list(q.get("performers"))
+        if not (q.get("q") or id_list(q.get("tags")) or q.get("fav_tags") == "1" or id_list(q.get("performers"))
                 or id_list(q.get("studios")) or q.get("favorites") in ("PERFORMER", "STUDIO", "ALL")):
             raise ApiError(400, "Pick a tag, performer, studio, favourites or title words first; "
                                 "without one, a saved search would request every new scene.")
@@ -1637,13 +1701,16 @@ class App:
         """Note the scenes matching since the last check: newest changes first, until the
         ones seen last time. Returns how many were new."""
         q = self.watch_query(w["query"])
-        inp = self.scene_input(q)
+        favs = self.fav_tag_ids({"id": w["user_id"]})   # the owner's, as they are now
+        if q.get("fav_tags") == "1" and not favs:
+            return 0
+        inp = self.scene_input(q, favs)
         inp.update(per_page=100, sort="UPDATED_AT", direction="DESC",
                    date={"value": day_before(w["since"]), "modifier": "GREATER_THAN"})
         newest, found = w["cursor"], 0
         for page in range(1, WATCH_PAGES + 1):
             inp["page"] = page
-            result, scenes = self.filtered_scenes(q, inp, ttl=0)
+            result, scenes = self.filtered_scenes(q, inp, favs, ttl=0)
             for sc in scenes:
                 if not self.db.one("SELECT 1 AS x FROM watch_scenes WHERE watch_id = ? AND scene_id = ?",
                                    (w["id"], sc["id"])):
@@ -1975,6 +2042,7 @@ class Handler(BaseHTTPRequestHandler):
                    "pending": app.pending_count() if admin_user else 0,
                    "whisparr_url": app.whisparr.web_url() if admin_user else None}
             if user:
+                out["fav_tags"] = app.fav_tags(user)
                 app.remember_origin(self.origin())
                 app.jellyfin.ensure()
                 if app.jellyfin.creds()[1] and app.jellyfin.server_id:
@@ -2017,7 +2085,7 @@ class Handler(BaseHTTPRequestHandler):
         if key == ("GET", "discover"):
             return 200, app.discover(user), None
         if key == ("GET", "scenes"):
-            return 200, app.browse_scenes(q), None
+            return 200, app.browse_scenes(q, user), None
         if key == ("GET", "scene") and len(parts) == 2:
             return 200, app.scene(parts[1]), None
         if key == ("GET", "search"):
@@ -2038,7 +2106,12 @@ class Handler(BaseHTTPRequestHandler):
             tag = app.stash.find_tag(parts[1])
             if not tag:
                 raise ApiError(404, "StashDB has no tag with that ID.")
-            return 200, tag, None
+            return 200, dict(tag, is_favorite=tag["id"] in app.fav_tag_ids(user)), None
+        if key == ("POST", "favorite-tags"):
+            body = self.body_json()
+            if not id_list(body.get("id")):
+                raise ApiError(400, "Favourite takes a tag ID.")
+            return 200, {"tags": app.set_fav_tag(user, body["id"], bool(body.get("favorite")))}, None
 
         # -- favourites (admins: they're the StashDB account's) --
         if key == ("POST", "favorite"):

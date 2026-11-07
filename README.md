@@ -79,6 +79,13 @@ On a phone, open it and "Add to home screen" for an app icon.
   Scenes page's Favourites filter, "favourites only" on Performers and Studios, and saved
   searches. Nothing is downloaded for them. (Whisparr's own StashDB import list, if you
   switch it on, does add favourites to Whisparr, with their whole back catalogue.)
+- **Favourite tags** (anyone, the heart on a tag's page): StashDB has none, so Desireerr keeps
+  them, per user. They're a filter too: "With any of my favourite tags" on Scenes (and saved
+  searches, which use your favourites as they are at each check), a Discover row, and the
+  top of the Tags page; favourite tags are marked with a heart wherever tags are listed.
+  StashDB takes one tags condition per search: with tags picked as well, the favourites go
+  to StashDB and the picked tags are checked by Desireerr, so pages can come back short
+  (with a single favourite tag and "All tags", it's one exact search).
 - **Follow a performer or studio** (admins): monitored in Whisparr with the "after" date set to
   today, so only new scenes are wanted. Without a date Whisparr would want the whole back
   catalogue. Older scenes can still be requested one by one.
