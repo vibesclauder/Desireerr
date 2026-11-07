@@ -1,0 +1,29 @@
+# Desireerr: Seerr-style requests for StashDB scenes, through Whisparr. Port 5056.
+# User unit: install to ~/.config/systemd/user/ (see README). Runs as you, so it can read
+# torrent-box's Whisparr API key; no root needed for a port above 1024.
+[Unit]
+Description=Desireerr request app (StashDB + Whisparr)
+Documentation=https://github.com/vibesclauder/desireerr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/desireerr/desireerr.py --port 5056 --data %S/desireerr --cache %C/desireerr/images
+Restart=on-failure
+RestartSec=5
+
+# Settings, users and requests in ~/.local/state/desireerr; covers in ~/.cache/desireerr.
+StateDirectory=desireerr
+CacheDirectory=desireerr
+
+# Sandboxing: a read-only view of the system and home, except its own two directories.
+# In user units, systemd only applies the filesystem protections inside a user namespace,
+# hence PrivateUsers=yes; without it they are silently ignored.
+PrivateUsers=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
