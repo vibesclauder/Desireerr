@@ -95,6 +95,10 @@ function fmtDate(d) {
   const dt = new Date(d + (parts.length === 2 ? "-01" : "") + "T12:00:00");
   return dt.toLocaleDateString(undefined, parts.length === 2 ? { year: "numeric", month: "short" } : { year: "numeric", month: "short", day: "numeric" });
 }
+function localToday() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
 function fmtDur(sec) {
   if (!sec) return "";
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -145,6 +149,9 @@ const ICONS = {
   bellOff: '<path d="M3 3l18 18M8.3 5.3A6 6 0 0 1 18 11v4M6 11v5l-1.5 2H17M10 20.5a2.2 2.2 0 0 0 4 0"/>',
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   alert: '<path d="M12 3 2 20h20zM12 9v5M12 17h.01"/>',
+  play: '<path d="M7 4.5v15l12.5-7.5z"/>',
+  bookmark: '<path d="M6 3.5h12v17l-6-4.2-6 4.2z"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/>',
 };
 const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`);
 
@@ -169,6 +176,7 @@ const ROUTES = [
   [/^\/tag\/([\w-]+)$/, viewTag, "tags"],
   [/^\/search$/, viewSearch, "search"],
   [/^\/requests$/, viewRequests, "requests"],
+  [/^\/saved$/, viewSaved, "saved"],
   [/^\/settings$/, viewSettings, "settings"],
 ];
 
@@ -230,6 +238,7 @@ function shell() {
     ["/studios", "building", "Studios", "studios"],
     ["/tags", "tag", "Tags", "tags"],
     ["/requests", "inbox", "Requests", "requests"],
+    ["/saved", "bookmark", "Saved searches", "saved"],
     ["/settings", "settings", "Settings", "settings"],
   ];
   root.innerHTML = html`
@@ -325,8 +334,8 @@ const errorPage = (e) => html`<div class="page">${errorBox(e)}</div>`;
 // Components
 // ---------------------------------------------------------------------------------------
 
-const STATE_LABEL = { available: "Available", processing: "Requested", downloading: "Downloading", pending: "Pending approval", declined: "Declined", failed: "Failed", none: "Not requested" };
-const STATE_ICON = { available: "check", processing: "clock", downloading: "download", pending: "clock", declined: "x", failed: "alert" };
+const STATE_LABEL = { available: "Available", processing: "Requested", downloading: "Downloading", pending: "Pending approval", declined: "Declined", failed: "Failed", abandoned: "Given up", none: "Not requested" };
+const STATE_ICON = { available: "check", processing: "clock", downloading: "download", pending: "clock", declined: "x", failed: "alert", abandoned: "x" };
 
 function statePill(st) {
   const s = st?.status || "none";
@@ -338,7 +347,23 @@ function stateDot(st) {
   if (s === "none") return "";
   return html`<span class="state-dot ${s}" title="${s === "downloading" ? `Downloading ${st.progress || 0}%` : STATE_LABEL[s]}">${icon(STATE_ICON[s])}</span>`;
 }
-const canRequest = (st) => ["none", "declined", "failed"].includes(st?.status || "none");
+const canRequest = (st) => ["none", "declined", "failed", "abandoned"].includes(st?.status || "none");
+
+// Jellyfin's page for a downloaded scene: at the address set in Settings, or on the host
+// Desireerr is opened at, on Jellyfin's port.
+function watchUrl(st) {
+  const j = status.jellyfin;
+  if (!j || !st?.jellyfin_id) return "";
+  const base = j.link || `${location.protocol}//${location.hostname}:8096`;
+  return `${base}/web/#/details?id=${encodeURIComponent(st.jellyfin_id)}&serverId=${encodeURIComponent(j.server_id)}`;
+}
+const watchButton = (st, cls = "") => {
+  const url = watchUrl(st);
+  return url ? html`<a class="btn ok ${cls}" href="${url}" target="_blank" rel="noreferrer">${icon("play")}Watch</a>` : "";
+};
+// The requester and admins can search again for a stalled request, or give up on it.
+const mayNudge = (r) => r && r.stalled_days && (me.is_admin || r.user_id === me.id);
+const stalledNote = (r) => html`No release found in ${r.stalled_days} days.`;
 
 function sceneQuick(s) {
   return html`${stateDot(s.state)}${canRequest(s.state) ? html`<button class="btn tiny primary req-btn" data-act="request" data-id="${s.id}">${icon("plus")}Request</button>` : ""}`;
@@ -392,9 +417,14 @@ function requestRow(r, { compact = false } = {}) {
     acts.push(html`<button class="btn small ok" data-act="approve" data-rid="${r.id}">${icon("check")}${r.status === "failed" ? "Retry" : "Approve"}</button>`);
     acts.push(html`<button class="btn small danger" data-act="decline" data-rid="${r.id}">${icon("x")}Decline</button>`);
   }
+  if (st.status === "available") acts.push(watchButton(st, "small"));
+  if (mayNudge(r)) {
+    acts.push(html`<button class="btn small" data-act="search" data-rid="${r.id}" title="Whisparr searches the indexers again now">${icon("refresh")}Search again</button>`);
+    acts.push(html`<button class="btn small ghost" data-act="giveup" data-rid="${r.id}" title="Whisparr stops waiting for a release; it can be requested again later">${icon("x")}Give up</button>`);
+  }
   if (r.status === "pending" && (me.is_admin || r.user_id === me.id) && st.status === "pending") {
     acts.push(html`<button class="btn small ghost" data-act="cancel" data-rid="${r.id}">Cancel request</button>`);
-  } else if (me.is_admin && ["approved", "declined", "failed"].includes(r.status)) {
+  } else if (me.is_admin && ["approved", "declined", "failed", "abandoned"].includes(r.status)) {
     acts.push(html`<button class="btn small ghost" data-act="cancel" data-rid="${r.id}">Remove</button>`);
   }
   return html`<div class="req" data-request="${r.id}">
@@ -404,8 +434,9 @@ function requestRow(r, { compact = false } = {}) {
       <a class="t" href="/scene/${r.scene_id}">${r.title || "Untitled"}</a>
       <div class="m">${[r.studio, fmtDate(r.release_date)].filter(Boolean).join(" · ")}</div>
       <div>${statePill(st)}</div>
-      <div class="m">Requested ${fmtAgo(r.created)}${r.requested_by ? ` by ${r.requested_by}` : ""}${r.decided_by_name && r.status !== "pending" ? ` · ${r.status === "declined" ? "declined" : r.status === "failed" ? "tried" : "approved"} by ${r.decided_by_name}` : ""}</div>
+      <div class="m">Requested ${fmtAgo(r.created)}${r.requested_by ? ` by ${r.requested_by}` : ""}${r.via ? ` · saved search “${r.via}”` : ""}${r.decided_by_name && r.status !== "pending" ? ` · ${{ declined: "declined", failed: "tried", abandoned: "given up" }[r.status] || "approved"} by ${r.decided_by_name}` : ""}</div>
       ${r.error && r.status === "failed" ? html`<div class="err">${r.error}</div>` : ""}
+      ${r.stalled_days ? html`<div class="m warn-text">${stalledNote(r)}</div>` : ""}
     </div>
     ${compact ? "" : html`<div class="acts">${acts}</div>`}
   </div>`;
@@ -443,6 +474,18 @@ document.addEventListener("click", async (e) => {
     } else if (act === "cancel") {
       await api(`requests/${b.dataset.rid}`, { method: "DELETE" });
       toast("Request removed.");
+      afterChange(null, null);
+    } else if (act === "search") {
+      await api(`requests/${b.dataset.rid}/search`, { method: "POST" });
+      toast("Whisparr is searching for it again.");
+      afterChange(null, null);
+    } else if (act === "giveup") {
+      await api(`requests/${b.dataset.rid}/give-up`, { method: "POST" });
+      toast("Given up. Whisparr doesn't wait for it any more.");
+      afterChange(null, null);
+    } else if (act === "search-all") {
+      const r = await api("requests/search-stalled", { method: "POST" });
+      toast(`Whisparr is searching again for ${r.searched} request${r.searched === 1 ? "" : "s"}.`);
       afterChange(null, null);
     } else if (act === "favorite") {
       const fav = b.dataset.favorite === "1";
@@ -550,7 +593,7 @@ const SORTS = [
   ["TITLE:asc", "Title A to Z"],
 ];
 
-async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = {}) {
+async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {}, hide = [] } = {}) {
   const params = new URLSearchParams(location.search);
   const f = {
     q: params.get("q") || "",
@@ -571,6 +614,8 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
   const names = await api("names" + qs({ tags: [...f.tags, ...f.not_tags], performers: f.performers, studios: f.studios }));
   if (!ctx.alive()) return;
   const named = (ids, kind) => ids.map((id) => ({ id, name: names[kind]?.[id] || id.slice(0, 8) }));
+  // The chips' names, for a saved search's name and summary.
+  const labels = { tags: named(f.tags, "tags"), not_tags: named(f.not_tags, "tags"), performers: named(f.performers, "performers"), studios: named(f.studios, "studios") };
 
   const activeCount = () => [f.q, f.tags.length, f.not_tags.length, f.performers.length, f.studios.length, f.after, f.before, f.favorites, f.hide_have].filter(Boolean).length;
   el.innerHTML = html`
@@ -600,8 +645,16 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
       <div class="filter-row">
         <label class="check"><input type="checkbox" id="f-hide" ${f.hide_have ? "checked" : ""}> Hide scenes I already have or requested</label>
         ${fixed.studios ? html`<label class="check"><input type="checkbox" id="f-sub" ${f.sub_studios ? "checked" : ""}> Include its sub-studios</label>` : ""}
-        <button class="btn small ghost" type="button" id="f-clear" style="margin-left:auto">Clear filters</button>
+        <button class="btn small" type="button" id="f-save" style="margin-left:auto" title="Request new scenes that match these filters, every hour">${icon("bookmark")}Save search</button>
+        <button class="btn small ghost" type="button" id="f-clear">Clear filters</button>
       </div>
+      <form class="filter-row save-search" id="f-saveform" hidden>
+        <label class="field grow"><span>Saved search's name</span><input class="input" name="wname" maxlength="80" required></label>
+        <label class="field"><span>Scenes released from</span><input class="input" type="date" name="since" required></label>
+        ${me.is_admin || me.auto_approve ? html`<label class="check"><input type="checkbox" name="ask_first"> Ask me before requesting</label>` : html`<span class="note">Its requests wait for an admin, like yours do.</span>`}
+        <button class="btn small primary">Save</button>
+        <p class="note">Every hour, new scenes that match these filters are requested, and older ones (released from that date on) that get tagged to match later. Sorting and the release dates above don't count.</p>
+      </form>
     </details>
     <div class="section-head"><h2 id="b-count" class="sub" style="font-size:15px;color:var(--muted);font-weight:500"></h2></div>
     <div class="grid scenes" id="b-grid"></div>
@@ -622,10 +675,10 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
     load(true);
   };
 
-  picker($("#f-tags", el), { kind: "tags", placeholder: "Add a tag", values: named(f.tags, "tags"), onChange: (v) => { f.tags = v.map((x) => x.id); sync(); } });
-  picker($("#f-not", el), { kind: "tags", placeholder: "Leave out a tag", chip: "exc", values: named(f.not_tags, "tags"), onChange: (v) => { f.not_tags = v.map((x) => x.id); sync(); } });
-  if ($("#f-perf", el)) picker($("#f-perf", el), { kind: "performers", placeholder: "Add a performer", values: named(f.performers, "performers"), onChange: (v) => { f.performers = v.map((x) => x.id); sync(); } });
-  if ($("#f-studio", el)) picker($("#f-studio", el), { kind: "studios", placeholder: "Add a studio", values: named(f.studios, "studios"), onChange: (v) => { f.studios = v.map((x) => x.id); sync(); } });
+  picker($("#f-tags", el), { kind: "tags", placeholder: "Add a tag", values: labels.tags, onChange: (v) => { labels.tags = [...v]; f.tags = v.map((x) => x.id); sync(); } });
+  picker($("#f-not", el), { kind: "tags", placeholder: "Leave out a tag", chip: "exc", values: labels.not_tags, onChange: (v) => { labels.not_tags = [...v]; f.not_tags = v.map((x) => x.id); sync(); } });
+  if ($("#f-perf", el)) picker($("#f-perf", el), { kind: "performers", placeholder: "Add a performer", values: labels.performers, onChange: (v) => { labels.performers = [...v]; f.performers = v.map((x) => x.id); sync(); } });
+  if ($("#f-studio", el)) picker($("#f-studio", el), { kind: "studios", placeholder: "Add a studio", values: labels.studios, onChange: (v) => { labels.studios = [...v]; f.studios = v.map((x) => x.id); sync(); } });
   $("#f-q", el).addEventListener("input", debounce((e) => { f.q = e.target.value.trim(); sync(); }, 400));
   $("#f-sort", el).onchange = (e) => { [f.sort, f.dir] = e.target.value.split(":"); sync(); };
   $("#f-fav", el).onchange = (e) => { f.favorites = e.target.value; sync(); };
@@ -641,6 +694,48 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
     if (f.tags.length > 1) sync();
   };
   $("#f-clear", el).onclick = () => { history.replaceState(null, "", location.pathname); render(); };
+
+  // Saving the filters as a saved search: what they match, in words, and as a query.
+  const performers = () => [...(fixed.performers || []), ...f.performers.filter((p) => !(fixed.performers || []).includes(p))];
+  const describe = () => {
+    const nm = (list) => list.map((x) => x.name);
+    const perf = [...(fixedNames.performers || []), ...labels.performers];
+    const studios = fixedNames.studios || labels.studios;
+    const parts = [];
+    if (labels.tags.length) parts.push(nm(labels.tags).join(f.tag_mode === "any" ? " or " : " + "));
+    if (perf.length) parts.push(nm(perf).join(" & "));
+    if (studios.length) parts.push(nm(studios).join(" or ") + (fixed.studios && f.sub_studios ? " (with sub-studios)" : ""));
+    if (f.favorites) parts.push({ ALL: "StashDB favourites", PERFORMER: "Favourite performers", STUDIO: "Favourite studios" }[f.favorites]);
+    if (f.q) parts.push(`“${f.q}”`);
+    if (labels.not_tags.length) parts.push("not " + nm(labels.not_tags).join(", "));
+    return parts.join(" · ");
+  };
+  const watchQuery = () => qs(Object.fromEntries(Object.entries({
+    q: f.q, tags: f.tags, tag_mode: f.tags.length > 1 && f.tag_mode !== "all" ? f.tag_mode : "", not_tags: f.not_tags,
+    performers: performers(), performer_mode: performers().length > 1 ? "all" : "",
+    studios: fixed.studios || f.studios, sub_studios: fixed.studios && f.sub_studios ? "1" : "", favorites: f.favorites,
+  }).filter(([, v]) => !(Array.isArray(v) && !v.length)))).slice(1);
+  const saveForm = $("#f-saveform", el);
+  $("#f-save", el).onclick = () => {
+    if (!saveForm.hidden) { saveForm.hidden = true; return; }
+    if (!(f.q || f.tags.length || performers().length || (fixed.studios || f.studios).length || f.favorites)) {
+      return toast("Pick a tag, performer, studio or favourites first. Without one, a saved search would request every new scene.", true);
+    }
+    saveForm.wname.value = describe().slice(0, 80);
+    saveForm.since.value = localToday();
+    saveForm.hidden = false;
+    saveForm.wname.select();
+  };
+  saveForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $("button.primary", saveForm);
+    btn.classList.add("busy");
+    try {
+      await api("watches", { method: "POST", body: { name: saveForm.wname.value, since: saveForm.since.value, ask_first: !!saveForm.ask_first?.checked, query: watchQuery(), summary: describe() } });
+      saveForm.hidden = true;
+      toast("Saved. New matching scenes are requested every hour; see Saved searches.");
+    } catch (err) { toast(err.message, true); } finally { btn.classList.remove("busy"); }
+  };
 
   const grid = $("#b-grid", el), more = $("#b-more", el), countEl = $("#b-count", el);
   let page = 0, total = 0, loading = false, seq = 0, shown = 0;
@@ -887,6 +982,11 @@ function sceneActions(s) {
     }
     if (me.is_admin || r.user_id === me.id) out.push(html`<button class="btn ghost" data-act="cancel" data-rid="${r.id}">Cancel request</button>`);
   }
+  if (st.status === "available") out.push(watchButton(st));
+  if (mayNudge(r)) {
+    out.push(html`<button class="btn" data-act="search" data-rid="${r.id}" title="Whisparr searches the indexers again now">${icon("refresh")}Search again</button>`);
+    out.push(html`<button class="btn ghost" data-act="giveup" data-rid="${r.id}" title="Whisparr stops waiting for a release; it can be requested again later">${icon("x")}Give up</button>`);
+  }
   if (me.is_admin && st.whisparr_id && status.whisparr_url) out.push(html`<a class="btn ghost" href="${status.whisparr_url}/movie/${st.whisparr_id}" target="_blank" rel="noreferrer">${icon("external")}Whisparr</a>`);
   out.push(html`<a class="btn ghost" href="${s.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a>`);
   return out;
@@ -923,7 +1023,7 @@ async function viewScene(view, id, ctx) {
           <div class="facts">${[fmtDate(s.release_date), fmtDur(s.duration), s.code].filter(Boolean).map((x) => html`<span>${x}</span>`)}</div>
           <div>${statePill(s.state)}</div>
           ${s.state.status === "downloading" ? html`<div class="dl-bar"><i style="width:${s.state.progress || 0}%"></i></div><div class="note">${s.state.timeleft ? `About ${s.state.timeleft} left` : ""}</div>` : ""}
-          ${s.state.status === "processing" ? html`<div class="note">Whisparr wants this scene and grabs it when a release shows up.</div>` : ""}
+          ${s.state.status === "processing" ? html`<div class="note ${s.request?.stalled_days ? "warn-text" : ""}">${s.request?.stalled_days ? stalledNote(s.request) : ""} Whisparr wants this scene and grabs it when a release shows up.</div>` : ""}
           ${s.state.status === "failed" && s.request?.error ? html`<div class="note bad-text">${s.request.error}</div>` : ""}
           <div class="btns">${sceneActions(s)}</div>
         </div>
@@ -943,7 +1043,7 @@ async function viewScene(view, id, ctx) {
       <aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>
     </div>
   </div>`.s;
-  view.addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(s.images, +b.dataset.photo, s.title); });
+  $(".page", view).addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(s.images, +b.dataset.photo, s.title); });
 }
 
 function favoriteButton(kind, item) {
@@ -1010,8 +1110,8 @@ async function viewPerformer(view, id, ctx) {
       ${facts.length ? html`<aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>` : ""}
     </div>
   </div>`.s;
-  view.addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(photos, +b.dataset.photo, p.name); });
-  await sceneBrowser($("#browser", view), ctx, { fixed: { performers: [id] } });
+  $(".page", view).addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(photos, +b.dataset.photo, p.name); });
+  await sceneBrowser($("#browser", view), ctx, { fixed: { performers: [id] }, fixedNames: { performers: [{ id, name: p.name }] } });
 }
 
 async function viewStudio(view, id, ctx) {
@@ -1035,7 +1135,7 @@ async function viewStudio(view, id, ctx) {
     </section>
     <div class="section"><div class="section-head"><h2>Scenes</h2></div><div class="section" id="browser"></div></div>
   </div>`.s;
-  await sceneBrowser($("#browser", view), ctx, { fixed: { studios: [id] }, defaults: { sub_studios: s.child_studios?.length ? "1" : "" }, hide: ["studios"] });
+  await sceneBrowser($("#browser", view), ctx, { fixed: { studios: [id] }, fixedNames: { studios: [{ id, name: s.name }] }, defaults: { sub_studios: s.child_studios?.length ? "1" : "" }, hide: ["studios"] });
 }
 
 async function viewTag(view, id, ctx) {
@@ -1096,7 +1196,7 @@ async function viewTags(view, ctx) {
       body.innerHTML = html`<div class="chips">${all.map((t) => html`<a class="chip" href="/tag/${t.id}" title="${t.description || ""}">${t.name}</a>`)}</div>`.s;
     } catch (err) { body.innerHTML = html`<span class="note bad-text">${err.message}</span>`.s; }
   };
-  view.addEventListener("click", (e) => { const b = e.target.closest(".cat > button"); if (b) open(b.parentElement); });
+  $(".page", view).addEventListener("click", (e) => { const b = e.target.closest(".cat > button"); if (b) open(b.parentElement); });
   if (location.hash.startsWith("#cat-")) {
     const cat = $(location.hash, view);
     if (cat) { open(cat); cat.scrollIntoView({ block: "center" }); }
@@ -1200,9 +1300,10 @@ async function viewSearch(view, ctx) {
 
 async function viewRequests(view, ctx) {
   const which = new URLSearchParams(location.search).get("filter") || (me.is_admin && status.pending ? "pending" : "all");
-  const tabs = [["all", "All"], ["pending", "Pending"], ["approved", "Approved"], ["available", "Available"], ["declined", "Declined"], ["failed", "Failed"]];
+  const tabs = [["all", "All"], ["pending", "Pending"], ["approved", "Approved"], ["stalled", "Stalled"], ["available", "Available"], ["declined", "Declined"], ["failed", "Failed"]];
   view.innerHTML = html`<div class="page">
     <div class="page-title"><h1>Requests</h1>${!me.is_admin ? html`<span class="sub">Your requests</span>` : ""}</div>
+    ${which === "stalled" ? html`<p class="note" style="margin:0">Approved, but no release found for a while: Whisparr only grabs a scene when a new release shows up, unless it's searched for again.</p>` : ""}
     <nav class="tabs">${tabs.map(([k, l]) => html`<a href="/requests?filter=${k}" class="${k === which ? "on" : ""}">${l}${k === "pending" && status.pending ? ` (${status.pending})` : ""}</a>`)}</nav>
     <div class="req-list" id="r-list"><div class="center"><div class="spinner"></div></div></div>
     <div class="load-more" id="r-more"></div>
@@ -1215,12 +1316,84 @@ async function viewRequests(view, ctx) {
     if (page === 1) list.innerHTML = "";
     list.insertAdjacentHTML("beforeend", res.requests.map((r) => requestRow(r).s).join(""));
     shown += 30;
-    if (page === 1 && !res.requests.length) list.innerHTML = html`<div class="empty">No requests here. Find a scene and press Request.</div>`.s;
-    more.innerHTML = which !== "available" && shown < res.count ? html`<button class="btn" id="r-next">Load more</button>`.s : "";
+    if (page === 1 && !res.requests.length) list.innerHTML = html`<div class="empty">${which === "stalled" ? "No stalled requests." : "No requests here. Find a scene and press Request."}</div>`.s;
+    if (page === 1 && which === "stalled" && me.is_admin && res.count > 1) list.insertAdjacentHTML("afterbegin", html`<div class="btns"><button class="btn" data-act="search-all">${icon("refresh")}Search again for all ${res.count}</button></div>`.s);
+    more.innerHTML = shown < res.count ? html`<button class="btn" id="r-next">Load more</button>`.s : "";
   };
   more.addEventListener("click", (e) => { if (e.target.closest("#r-next")) { page++; load().catch((err) => toast(err.message, true)); } });
   await load();
 }
+
+async function viewSaved(view, ctx) {
+  const { watches } = await api("watches");
+  if (!ctx.alive()) return;
+  const canAuto = me.is_admin || me.auto_approve;
+  const row = (w) => html`<div class="watch ${w.enabled ? "" : "off"}" data-watch="${w.id}">
+    <div class="info">
+      <div class="t">${w.name}</div>
+      ${w.summary && w.summary !== w.name ? html`<div class="m">${w.summary}</div>` : ""}
+      <div class="m">Scenes released from ${fmtDate(w.since)} · ${w.requests} requested${w.waiting ? ` · ${w.waiting} not in Whisparr yet` : ""}${w.user_id !== me.id ? ` · ${w.owner}'s` : ""}</div>
+      <div class="m">${!w.enabled ? "Paused" : w.checked ? `Checked ${fmtAgo(w.checked)}` : "Checked within the hour"}${w.ask_first || !canAuto ? " · requests wait for approval" : ""}</div>
+      ${w.error ? html`<div class="err">${w.error}</div>` : ""}
+    </div>
+    <div class="btns">
+      ${canAuto ? html`<label class="check"><input type="checkbox" data-wact="ask" ${w.ask_first ? "checked" : ""}> Ask first</label>` : ""}
+      <a class="btn small ghost" href="/scenes?${w.query}">Show scenes</a>
+      <button class="btn small" data-wact="check">${icon("refresh")}Check now</button>
+      <button class="btn small ghost" data-wact="toggle">${w.enabled ? "Pause" : "Resume"}</button>
+      <button class="btn small danger" data-wact="del">Delete</button>
+    </div>
+  </div>`;
+  view.innerHTML = html`<div class="page">
+    <div class="page-title"><h1>Saved searches</h1><span class="sub">New scenes that match are requested every hour</span></div>
+    ${watches.length ? html`<div class="watch-list">${watches.map(row)}</div>`
+      : html`<div class="empty">No saved searches yet. On Scenes, or a tag's, performer's or studio's page, open Filters, pick what you want and press Save search.</div>`}
+  </div>`.s;
+  const put = (id, body) => api(`watches/${id}`, { method: "PUT", body });
+  // On this render's page: #view stays, and its listeners would pile up across visits.
+  const page = $(".page", view);
+  page.addEventListener("change", async (e) => {
+    const box = e.target.closest("[data-wact=ask]");
+    if (!box) return;
+    try { await put(box.closest("[data-watch]").dataset.watch, { ask_first: box.checked }); toast(box.checked ? "Its requests wait for your approval." : "Its requests go straight to Whisparr."); }
+    catch (err) { toast(err.message, true); render(); }
+  });
+  page.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-wact]");
+    if (!b || b.classList.contains("busy")) return;
+    const id = b.closest("[data-watch]").dataset.watch;
+    const w = watches.find((x) => String(x.id) === id);
+    if (b.dataset.wact === "del" && b.dataset.sure !== "1") {
+      b.dataset.sure = "1"; b.textContent = "Delete it?";
+      setTimeout(() => { if (b.isConnected) { b.dataset.sure = ""; b.textContent = "Delete"; } }, 4000);
+      return;
+    }
+    b.classList.add("busy");
+    try {
+      if (b.dataset.wact === "check") {
+        const r = await api(`watches/${id}/check`, { method: "POST" });
+        toast(`${r.found} new match${r.found === 1 ? "" : "es"}, ${r.requested} requested${r.waiting ? `, ${r.waiting} not in Whisparr yet` : ""}.`);
+      } else if (b.dataset.wact === "toggle") {
+        await put(id, { enabled: !w.enabled });
+      } else if (b.dataset.wact === "del") {
+        await api(`watches/${id}`, { method: "DELETE" });
+        toast(`Deleted “${w.name}”. Its requests stay.`);
+      }
+      render();
+    } catch (err) { toast(err.message, true); b.classList.remove("busy"); }
+  });
+}
+
+const NOTIFY_EVENTS = [
+  ["pending", "A request waits for approval"],
+  ["watch", "A saved search requests a scene"],
+  ["auto", "A request is approved automatically (admins' own and auto-approved users')"],
+  ["approved", "An admin approves a request"],
+  ["declined", "An admin declines a request"],
+  ["available", "A requested scene is downloaded"],
+  ["failed", "A request fails"],
+  ["stalled", "A request finds no release for too long (set under Whisparr)"],
+];
 
 async function viewSettings(view, ctx) {
   const parts = [];
@@ -1259,8 +1432,34 @@ async function viewSettings(view, ctx) {
         <label class="field"><span>API key</span><input class="input" name="whisparr_key" type="password" autocomplete="off" placeholder="${s.whisparr_key_from_config ? "Read from torrent-box's Whisparr" : s.whisparr_key_set ? "Saved" : "Whisparr → Settings → General"}"></label>
         <label class="field"><span>Quality profile</span><select class="input" name="quality_profile_id">${option("", "Same as most studios", s.quality_profile_id)}${(s.profiles || []).map((p) => option(String(p.id), p.name, s.quality_profile_id))}</select></label>
         <label class="field"><span>Folder for new scenes</span><select class="input" name="root_folder">${option("", "Whisparr's first folder", s.root_folder)}${(s.roots || []).map((r) => option(r.path, r.path, s.root_folder))}</select></label>
+        <label class="field"><span>Stalled after (days without a release)</span><input class="input" type="number" name="stall_days" min="1" max="365" value="${s.stall_days}"></label>
         <label class="check" style="grid-column:1/-1"><input type="checkbox" name="search_on_request" ${s.search_on_request ? "checked" : ""}> Search for a scene as soon as its request is approved. Without this, Whisparr only grabs it if it turns up in the RSS feed.</label>
         <div class="btns"><button class="btn primary">Save</button></div>
+      </form>
+    </section>`);
+    const tb = s.torrent_box_ntfy;
+    parts.push(html`<section class="panel">
+      <h2>Notifications</h2>
+      <p class="lede">Pushes through ntfy, like Seerr's.${tb ? " Left empty, they go to torrent-box's ntfy topic, so the phone that gets its pushes gets these too." : " Subscribe to the topic in the ntfy app."}</p>
+      ${s.notify_error ? html`<div class="error-box">${s.notify_error}</div>` : ""}
+      <form class="form-grid" id="nt-form">
+        <label class="field"><span>ntfy server</span><input class="input" name="notify_server" value="${s.notify_server}" placeholder="${tb ? `torrent-box's: ${tb}` : "https://ntfy.sh"}"></label>
+        <label class="field"><span>Topic</span><input class="input" name="notify_topic" value="${s.notify_topic}" autocomplete="off" placeholder="${tb ? "torrent-box's topic" : "A long, random name"}"></label>
+        <label class="field" style="grid-column:1/-1"><span>Desireerr's address, for links in pushes</span><input class="input" name="app_url" value="${s.app_url}" placeholder="${s.seen_origin || location.origin}"></label>
+        <fieldset class="events"><legend>Push when</legend>${NOTIFY_EVENTS.map(([k, l]) => html`<label class="check"><input type="checkbox" name="ev" value="${k}" ${s.notify_events.includes(k) ? "checked" : ""}> ${l}</label>`)}</fieldset>
+        <label class="check" style="grid-column:1/-1"><input type="checkbox" name="notify_discreet" ${s.notify_discreet ? "checked" : ""}> Discreet: no titles, names or covers, only “${s.tab_title || "Desireerr"}: A request is ready.” and the like. Without it, pushes are like Seerr's: what happened, the scene, who asked, its cover and a link to it.</label>
+        <div class="btns"><button class="btn primary">Save</button><button class="btn ghost" type="button" id="nt-test">Save and send a test</button></div>
+      </form>
+    </section>`);
+    parts.push(html`<section class="panel">
+      <h2>Jellyfin</h2>
+      <p class="lede">With an API key, downloaded scenes get a Watch button that opens them in Jellyfin. On a torrent-box server, its setup makes the key.</p>
+      ${s.jellyfin_error ? html`<div class="error-box">${s.jellyfin_error}</div>` : ""}
+      <form class="form-grid" id="jf-form">
+        <label class="field"><span>Address (from this server)</span><input class="input" name="jellyfin_url" value="${s.jellyfin_url}" placeholder="http://localhost:8096"></label>
+        <label class="field"><span>API key</span><input class="input" name="jellyfin_key" type="password" autocomplete="off" placeholder="${s.jellyfin_key_set ? "Saved. Paste a new one to replace it." : "Jellyfin: Dashboard, API Keys"}"></label>
+        <label class="field" style="grid-column:1/-1"><span>Address for the Watch button (from your browser)</span><input class="input" name="jellyfin_link" value="${s.jellyfin_link}" placeholder="${location.protocol}//${location.hostname}:8096"></label>
+        <div class="btns"><button class="btn primary">Save</button>${s.jellyfin_key_set && !s.jellyfin_error ? html`<span class="note ok-text">Connected: Jellyfin has ${s.jellyfin_videos} videos.</span>` : ""}</div>
       </form>
     </section>`);
     parts.push(html`<section class="panel">
@@ -1315,10 +1514,29 @@ async function viewSettings(view, ctx) {
   });
   submit("#wh-form", async (form) => {
     const d = formData(form);
-    const body = { whisparr_url: d.whisparr_url, quality_profile_id: d.quality_profile_id, root_folder: d.root_folder, search_on_request: form.search_on_request.checked };
+    const body = { whisparr_url: d.whisparr_url, quality_profile_id: d.quality_profile_id, root_folder: d.root_folder, search_on_request: form.search_on_request.checked, stall_days: d.stall_days };
     if (d.whisparr_key) body.whisparr_key = d.whisparr_key;
     const res = await api("settings", { method: "PUT", body });
     toast(res.whisparr_error ? `Saved, but: ${res.whisparr_error}` : "Saved.", !!res.whisparr_error);
+    render();
+  });
+  const saveNotify = (form) => api("settings", { method: "PUT", body: {
+    notify_server: form.notify_server.value, notify_topic: form.notify_topic.value, app_url: form.app_url.value,
+    notify_events: $$("input[name=ev]:checked", form).map((x) => x.value), notify_discreet: form.notify_discreet.checked,
+  } });
+  submit("#nt-form", async (form) => { await saveNotify(form); toast("Saved."); });
+  if ($("#nt-test", view)) $("#nt-test", view).onclick = async (e) => {
+    const b = e.currentTarget;
+    b.classList.add("busy");
+    try { await saveNotify($("#nt-form", view)); await api("notify-test", { method: "POST" }); toast("Sent. It should be on your phone now."); }
+    catch (err) { toast(err.message, true); } finally { b.classList.remove("busy"); }
+  };
+  submit("#jf-form", async (form) => {
+    const body = { jellyfin_url: form.jellyfin_url.value, jellyfin_link: form.jellyfin_link.value };
+    if (form.jellyfin_key.value.trim()) body.jellyfin_key = form.jellyfin_key.value.trim();
+    const res = await api("settings", { method: "PUT", body });
+    toast(res.jellyfin_error ? `Saved, but: ${res.jellyfin_error}` : "Saved.", !!res.jellyfin_error);
+    await refreshStatus();
     render();
   });
   submit("#pr-form", async (form) => {
@@ -1338,7 +1556,10 @@ async function viewSettings(view, ctx) {
     toast("Password changed. Other devices are signed out.");
   });
   $("#pv-covers", view).onchange = (e) => setCovers(e.target.checked);
-  view.addEventListener("change", async (e) => {
+  // On this render's page: listeners on #view itself would pile up across visits (and a
+  // second one would delete a user without asking).
+  const page = $(".page", view);
+  page.addEventListener("change", async (e) => {
     const field = e.target.dataset.field;
     const row = e.target.closest("[data-user]");
     if (!field || !row) return;
@@ -1346,7 +1567,7 @@ async function viewSettings(view, ctx) {
     try { await api(`users/${row.dataset.user}`, { method: "PUT", body: { [field]: value } }); toast("Saved."); if (field === "is_admin") render(); }
     catch (err) { toast(err.message, true); render(); }
   });
-  view.addEventListener("click", async (e) => {
+  page.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-uact]");
     if (!b) return;
     const row = b.closest("[data-user]");

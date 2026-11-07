@@ -13,6 +13,11 @@ or available.
   the browser only talks to Desireerr. Covers can be blurred, and the tab title is a setting.
 - **Users and approvals.** Admins approve requests, follow performers and studios, and
   change settings. Other users' requests wait for approval unless they're auto-approved.
+- **Saved searches.** Any filter on the Scenes page (tags in and out, performers, studios,
+  favourites) can request its new scenes every hour, which Whisparr's follows can't.
+- **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
+  button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
+  up for.
 
 Built for [torrent-box](https://github.com/vibesclauder/torrent-box): it finds Whisparr's API key in
 torrent-box's config on its own.
@@ -51,7 +56,8 @@ DESIREERR_ADMIN_USER=alice DESIREERR_ADMIN_PASSWORD=... DESIREERR_STASHDB_KEY=..
 ```
 
 Run again with a new password, it updates that admin. An admin made on the first-visit page
-and a key changed in Settings are left alone.
+and a key changed in Settings are left alone. `DESIREERR_JELLYFIN_KEY` sets a Jellyfin API
+key the same way (a new one given later replaces it, unless one was set in Settings).
 
 If ufw is on, open the port to the LAN (and the tailnet, if you use Tailscale):
 
@@ -74,12 +80,52 @@ On a phone, open it and "Add to home screen" for an app icon.
 - **Status** comes from Whisparr's library and queue, refreshed every two minutes:
   *available* (has a file), *downloading* (in the queue, with progress), *requested*
   (monitored, waiting for a release), *pending* (waiting for an admin).
+- **Stalled:** Whisparr searches once, when a request is approved; after that it only grabs
+  a release that turns up in its RSS feed. A request still waiting after 7 days (Settings,
+  Whisparr) is *stalled*: it's on the Requests page's Stalled tab, where the requester or an
+  admin can **search again** (one or all) or **give up** (Whisparr stops wanting it; it can
+  be requested again later).
+
+## Saved searches
+
+On Scenes (or a tag's, performer's or studio's page), open Filters, pick tags, performers,
+studios or favourites, and press **Save search**. Every hour, scenes released from the date
+you pick that match are requested: new ones, and older ones tagged later so they match.
+
+- Requests are made as you, so the usual rule applies: admins' and auto-approved users' go
+  straight to Whisparr, everyone else's wait. **Ask first** leaves them pending anyway.
+- Scenes Whisparr's metadata doesn't have yet (new StashDB scenes take about a day) are tried
+  at each check for two weeks, and not counted as failed. One check requests 25 at most.
+- Scenes already in the library, wanted, or asked for before (even declined) are skipped, as
+  are requests you removed.
+- The list is under **Saved searches**: check now, pause, ask first, delete (its requests
+  stay).
+
+## Notifications
+
+Settings, Notifications: pushes through [ntfy](https://ntfy.sh), for a request waiting for
+approval, one made by a saved search, a scene downloaded, a request failed or stalled
+(those are on to start with), and an automatic approval, an approval or a decline.
+
+- On a torrent-box server they go to its ntfy server and topic (its config), so the phone
+  that gets torrent-box's pushes gets these too. Set a server and topic to use others.
+- **Discreet** (on to start with): the browser tab title and one line, "A request is ready.",
+  with no title, name or cover. Off, they're like Seerr's: what happened, the scene, its
+  studio and date, who asked, its cover, and a tap opens the scene.
+- Links use Desireerr's address from Settings, or else the one it was last opened at.
+
+## Watch in Jellyfin
+
+With a Jellyfin API key (Settings, Jellyfin; torrent-box's setup makes one), available
+scenes get a **Watch** button on their page and in Requests. It finds the scene in Jellyfin
+by its file (Whisparr's path, or the file name if the two see different folders) and opens
+it at Jellyfin's address: the one in Settings, or the host Desireerr is opened at, port 8096.
 
 ## Files
 
 | Path | What |
 |---|---|
-| `~/.local/state/desireerr/desireerr.db` | Settings (StashDB key included), users, sessions, requests |
+| `~/.local/state/desireerr/desireerr.db` | Settings (StashDB and Jellyfin keys included), users, sessions, requests, saved searches |
 | `~/.cache/desireerr/images/` | Cover cache, trimmed to 2 GB |
 | `~/.config/desireerr/stashdb_api_key` | Optional: a StashDB key in a file, used when none is saved in Settings |
 

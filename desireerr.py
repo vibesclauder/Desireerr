@@ -4,7 +4,8 @@
 Browse and search StashDB (scenes, performers, studios, tags), request scenes and follow
 performers or studios. Approved requests go to Whisparr, which searches Prowlarr and
 downloads; the app shows each scene's state (pending, processing, downloading, available)
-from Whisparr's library and queue.
+from Whisparr's library and queue. Saved searches request new matching scenes on their own,
+ntfy pushes tell about requests, and downloaded scenes open in Jellyfin.
 
 One file, Python 3 standard library only. Settings, users, sessions and requests live in
 one SQLite file; cover images are fetched through the server and cached on disk, so the
@@ -13,6 +14,7 @@ browser only talks to Desireerr and nothing loads before you sign in.
 
 import argparse
 import base64
+import configparser
 import contextlib
 import hashlib
 import hmac
@@ -31,17 +33,21 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
 DEFAULT_WHISPARR = "http://localhost:6969"
 # torrent-box keeps Whisparr's config here; its API key is read from it when none is set.
 WHISPARR_CONFIG = Path.home() / ".local/share/torrent-box/arr/whisparr/config.xml"
+# torrent-box's settings: its ntfy server (config.ini) and topic (secrets.ini) are used when
+# none are set, so the phone that gets torrent-box's pushes gets Desireerr's too.
+TORRENT_BOX_CONF = Path.home() / ".config/rss2transmission"
+DEFAULT_JELLYFIN = "http://localhost:8096"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 SESSION_COOKIE = "desireerr_session"
@@ -52,6 +58,12 @@ IMAGE_HOSTS = re.compile(r"^(?:[a-z0-9-]+\.)*stashdb\.org$")
 IMAGE_CACHE_BYTES = 2 * 1024**3
 PER_PAGE_MAX = 100
 SLOW_REQUEST = 0.5           # seconds; slower API requests are logged with where the time went
+WATCH_EVERY = 3600           # seconds between a saved search's checks
+WATCH_PAGES = 5              # at most this many pages of 100 scenes per check
+WATCH_MAX_REQUESTS = 25      # requests one check makes at most; the rest wait for the next
+WATCH_RETRY_DAYS = 14        # how long a scene Whisparr doesn't know yet is tried again
+AVAILABLE_WINDOW = 2 * 86400  # "now available" only for files this new (not a backlog)
+JELLYFIN_MAX_AGE = 600       # seconds between Jellyfin library refreshes
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -60,7 +72,16 @@ DEFAULT_SETTINGS = {
     "quality_profile_id": "",    # empty: the one most studios use
     "root_folder": "",           # empty: Whisparr's first root folder
     "search_on_request": "1",
+    "stall_days": "7",           # approved, no release this many days: stalled
     "tab_title": "Desireerr",
+    "notify_server": "",         # empty: torrent-box's ntfy server
+    "notify_topic": "",          # empty: torrent-box's ntfy topic
+    "notify_events": "pending,watch,available,failed,stalled",
+    "notify_discreet": "1",      # no titles, names or pictures in pushes
+    "app_url": "",               # for links in pushes; empty: where the app was last opened
+    "jellyfin_url": DEFAULT_JELLYFIN,
+    "jellyfin_key": "",
+    "jellyfin_link": "",         # Jellyfin's address for the browser; empty: our host, :8096
 }
 
 
@@ -79,6 +100,10 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class NotInWhisparr(ApiError):
+    """Whisparr's metadata doesn't have the scene yet (new StashDB scenes take a while)."""
 
 
 # ---------------------------------------------------------------------------------------
@@ -179,7 +204,7 @@ CREATE TABLE IF NOT EXISTS requests (
     release_date TEXT NOT NULL DEFAULT '',
     image TEXT NOT NULL DEFAULT '',
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    status TEXT NOT NULL,            -- pending, approved, declined, failed
+    status TEXT NOT NULL,            -- pending, approved, declined, failed, abandoned
     whisparr_id INTEGER,
     error TEXT NOT NULL DEFAULT '',
     created INTEGER NOT NULL,
@@ -187,7 +212,37 @@ CREATE TABLE IF NOT EXISTS requests (
     decided_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS requests_scene ON requests(scene_id);
+CREATE TABLE IF NOT EXISTS watches (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    query TEXT NOT NULL,             -- the scene filters, as the Scenes page's URL query
+    summary TEXT NOT NULL DEFAULT '',
+    since TEXT NOT NULL,             -- only scenes released on or after this date
+    ask_first INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created INTEGER NOT NULL,
+    checked INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '', -- the newest StashDB "updated" time seen
+    error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS watch_scenes (
+    watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
+    scene_id TEXT NOT NULL,
+    card TEXT NOT NULL,              -- the scene as StashDB listed it (JSON)
+    seen INTEGER NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0, -- 0: to request, 1: done, 2: given up
+    PRIMARY KEY (watch_id, scene_id)
+);
 """
+
+# Columns added after the first release: (table, column, definition).
+COLUMNS = [
+    ("requests", "via", "TEXT NOT NULL DEFAULT ''"),        # the saved search that made it
+    ("requests", "watch_id", "INTEGER"),
+    ("requests", "notified", "TEXT NOT NULL DEFAULT ''"),   # pushes sent once: available, stalled
+    ("requests", "searched_at", "INTEGER"),                 # last "search again"
+]
 
 
 class DB:
@@ -199,6 +254,10 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        for table, column, definition in COLUMNS:
+            have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def all(self, sql, args=()):
         with self.lock:
@@ -236,7 +295,7 @@ class DB:
 
 SCENE_CARD = """
 fragment SceneCard on Scene {
-  id title release_date duration
+  id title release_date duration updated
   studio { id name }
   images { url width height }
   performers { as performer { id name gender } }
@@ -514,6 +573,7 @@ class Whisparr:
                 "monitored": bool(m.get("monitored")),
                 "has_file": bool(m.get("hasFile")),
                 "file_added": (m.get("movieFile") or {}).get("dateAdded", ""),
+                "path": (m.get("movieFile") or {}).get("path", ""),
                 "item_type": m.get("itemType", ""),
             }
         with self.lock:
@@ -611,8 +671,8 @@ class Whisparr:
             found = self.call("GET", "lookup/scene", params={"term": f"stash:{stash_id}"}) or []
             match = next((f for f in found if f.get("foreignId") == stash_id), None)
             if not match:
-                raise ApiError(502, "Whisparr couldn't find this scene in its metadata yet. "
-                                    "New StashDB scenes can take a day to show up there.")
+                raise NotInWhisparr(502, "Whisparr couldn't find this scene in its metadata yet. "
+                                         "New StashDB scenes can take a day to show up there.")
             profile, root = self.defaults()
             movie = dict(match["movie"])
             movie.pop("id", None)
@@ -628,6 +688,20 @@ class Whisparr:
                                                      "item_type": "scene"})
             entry.update({"id": movie_id, "monitored": True})
         return movie_id
+
+    def search(self, movie_ids):
+        """Ask Whisparr to search its indexers for these scenes now."""
+        self.call("POST", "command", {"name": "MoviesSearch", "movieIds": list(movie_ids)})
+
+    def unmonitor(self, movie_id):
+        movie = self.call("GET", f"movie/{movie_id}")
+        if movie.get("monitored"):
+            movie["monitored"] = False
+            self.call("PUT", f"movie/{movie_id}", movie)
+        with self.lock:
+            for entry in self.index.values():
+                if entry.get("id") == movie_id:
+                    entry["monitored"] = False
 
     def follow_state(self, kind, stash_id):
         items = self.call("GET", kind, params={"stashId": stash_id}) or []
@@ -672,6 +746,206 @@ class Whisparr:
     def web_url(self, whisparr_id=None):
         url, _ = self.creds()
         return f"{url}/movie/{whisparr_id}" if whisparr_id else url
+
+
+# ---------------------------------------------------------------------------------------
+# Notifications through ntfy
+# ---------------------------------------------------------------------------------------
+
+# event -> (title as Seerr words it, the discreet message)
+NOTIFY_EVENTS = {
+    "pending": ("New Scene Request", "A request is waiting for approval."),
+    "auto": ("Scene Request Automatically Approved", "A request was approved."),
+    "watch": ("Scene Requested by Saved Search", "A saved search made a request."),
+    "approved": ("Scene Request Approved", "A request was approved."),
+    "declined": ("Scene Request Declined", "A request was declined."),
+    "available": ("Scene Request Now Available", "A request is ready."),
+    "failed": ("Scene Request Failed", "A request failed."),
+    "stalled": ("Scene Request Still Waiting", "A request has no release yet."),
+}
+
+
+def torrent_box_ntfy(conf_dir=None):
+    """torrent-box's ntfy server and topic, or empty strings."""
+    conf_dir = Path(conf_dir or TORRENT_BOX_CONF)
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read([conf_dir / "config.ini", conf_dir / "secrets.ini"], encoding="utf-8")
+    except configparser.Error:
+        return "", ""
+    topic = parser.get("secrets", "ntfy_topic", fallback="").strip()
+    server = parser.get("ntfy", "server", fallback="").strip() or "https://ntfy.sh"
+    return (server, topic) if topic else ("", "")
+
+
+class Notifier:
+    """Pushes about requests to an ntfy topic, worded like Seerr's (title, scene, who asked,
+    a cover and a link), or discreetly: the tab title and a line that names nothing."""
+
+    def __init__(self, db, conf_dir=None):
+        self.db = db
+        self.conf_dir = conf_dir
+        self.error = ""          # the last push's trouble, for Settings
+        self.background = True   # tests push in the same thread
+
+    def target(self, s=None):
+        s = s or self.db.settings()
+        if s["notify_server"] or s["notify_topic"]:
+            return (s["notify_server"] or "https://ntfy.sh").rstrip("/"), s["notify_topic"]
+        server, topic = torrent_box_ntfy(self.conf_dir)
+        return server.rstrip("/"), topic
+
+    @staticmethod
+    def app_url(s):
+        return (s.get("app_url") or s.get("seen_origin") or "").rstrip("/")
+
+    def payload(self, event, req, s, extra=""):
+        title, quiet = NOTIFY_EVENTS[event]
+        base = self.app_url(s)
+        if s["notify_discreet"] == "1":
+            out = {"title": s["tab_title"] or "Desireerr", "message": quiet}
+            if base:
+                out["click"] = base + "/requests"
+            return out
+        lines = [req.get("title") or "Untitled"]
+        meta = " · ".join(x for x in (req.get("studio"), req.get("release_date")) if x)
+        if meta:
+            lines.append(meta)
+        lines.append("")
+        if req.get("requested_by"):
+            lines.append(f"Requested by: {req['requested_by']}")
+        if req.get("via"):
+            lines.append(f"Saved search: {req['via']}")
+        if event in ("approved", "declined") and req.get("decided_by_name"):
+            lines.append(f"{event.title()} by: {req['decided_by_name']}")
+        if event == "failed" and req.get("error"):
+            lines.append(f"Reason: {req['error']}")
+        if extra:
+            lines.append(extra)
+        out = {"title": title, "message": "\n".join(lines).strip()}
+        image = req.get("image") or ""
+        if image:
+            out["attach"] = image if "?" in image else image + "?size=600"
+        if base:
+            out["click"] = f"{base}/scene/{req['scene_id']}"
+        return out
+
+    def send(self, event, req, extra=""):
+        """Push in the background, if this event is switched on and there's a topic."""
+        s = self.db.settings()
+        if event not in s["notify_events"].split(","):
+            return
+        server, topic = self.target(s)
+        if not topic:
+            return
+        body = dict(self.payload(event, req, s, extra), topic=topic)
+        if self.background:
+            threading.Thread(target=self.post, args=(server, body), daemon=True).start()
+        else:
+            self.post(server, body)
+
+    def test(self):
+        s = self.db.settings()
+        server, topic = self.target(s)
+        if not topic:
+            raise ApiError(400, "No ntfy topic yet. Add one above.")
+        if s["notify_discreet"] == "1":
+            body = {"title": s["tab_title"] or "Desireerr", "message": "This is a test."}
+        else:
+            body = {"title": "Test Notification", "message": "Desireerr can reach this phone."}
+        if self.app_url(s):
+            body["click"] = self.app_url(s) + "/settings"
+        if not self.post(server, dict(body, topic=topic)):
+            raise ApiError(502, self.error)
+
+    def post(self, server, body):
+        req = urllib.request.Request(server + "/", data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            self.error = f"ntfy at {server} answered {e.code}."
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            self.error = f"Can't reach ntfy at {server} ({getattr(e, 'reason', e)})."
+        else:
+            self.error = ""
+            return True
+        print(f"notify: {self.error}", file=sys.stderr, flush=True)
+        return False
+
+
+# ---------------------------------------------------------------------------------------
+# Jellyfin: where a downloaded scene is, for the Watch button
+# ---------------------------------------------------------------------------------------
+
+class Jellyfin:
+    """Jellyfin's videos by file path (and by file name, should the paths differ), from its
+    library list, refreshed every few minutes and soon after a miss."""
+
+    def __init__(self, db):
+        self.db = db
+        self.lock = threading.Lock()
+        self.paths, self.names = {}, {}
+        self.server_id = ""
+        self.time = 0            # last refresh
+        self.tried = 0           # last attempt, so a down Jellyfin isn't asked every time
+        self.error = ""
+
+    def creds(self):
+        s = self.db.settings()
+        return (s.get("jellyfin_url") or DEFAULT_JELLYFIN).rstrip("/"), s.get("jellyfin_key", "")
+
+    def call(self, path, timeout=20):
+        url, key = self.creds()
+        req = urllib.request.Request(f"{url}/{path}", headers={
+            "Authorization": f'MediaBrowser Token="{key}"', "User-Agent": USER_AGENT})
+        try:
+            with timed("jellyfin"), urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise ApiError(502, "Jellyfin refused the API key. Check it in Settings.")
+            raise ApiError(502, f"Jellyfin answered {e.code}.")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            raise ApiError(502, f"Can't reach Jellyfin at {url} ({getattr(e, 'reason', e)}).")
+
+    def refresh(self):
+        self.tried = time.time()
+        info = self.call("System/Info/Public")
+        items = self.call("Items?Recursive=true&IncludeItemTypes=Movie,Video,MusicVideo"
+                          "&Fields=Path&EnableImages=false&EnableUserData=false"
+                          "&EnableTotalRecordCount=false", timeout=60).get("Items") or []
+        paths = {i["Path"]: i["Id"] for i in items if i.get("Path") and i.get("Id")}
+        names = {os.path.basename(p): i for p, i in paths.items()}
+        with self.lock:
+            self.paths, self.names = paths, names
+            self.server_id, self.time, self.error = info.get("Id", ""), time.time(), ""
+
+    def ensure(self):
+        """Refreshed once, so the Watch button's server ID is known (tried once a minute)."""
+        if self.creds()[1] and not self.time and time.time() - self.tried > 60:
+            try:
+                self.refresh()
+            except ApiError as e:
+                self.error = e.message
+
+    def find(self, path):
+        """Jellyfin's item ID for a file, or None."""
+        if not path or not self.creds()[1]:
+            return None
+        stale = time.time() - self.time > JELLYFIN_MAX_AGE
+        with self.lock:
+            hit = self.paths.get(path) or self.names.get(os.path.basename(path))
+        if (stale or not hit) and time.time() - self.tried > 60:
+            try:
+                self.refresh()
+            except ApiError as e:
+                self.error = e.message
+            with self.lock:
+                hit = self.paths.get(path) or self.names.get(os.path.basename(path))
+        return hit
 
 
 # ---------------------------------------------------------------------------------------
@@ -764,7 +1038,10 @@ class App:
         self.db = DB(self.data_dir / "desireerr.db")
         self.stash = StashDB(lambda: self.db.setting("stashdb_key") or self.file_key())
         self.whisparr = Whisparr(self.db)
+        self.notify = Notifier(self.db)
+        self.jellyfin = Jellyfin(self.db)
         self.images = Images(cache_dir) if cache_dir else None
+        self.watch_lock = threading.Lock()
         self.failures = {}       # ip -> (count, last time), for login throttling
         self.setup_code = self.load_setup_code() if setup_code else ""
 
@@ -885,6 +1162,9 @@ class App:
             st["whisparr_id"] = info["id"]
         if info and info["has_file"]:
             st["status"] = "available"
+            jid = self.jellyfin.find(info.get("path"))
+            if jid:
+                st["jellyfin_id"] = jid
         elif info and info["id"] in self.whisparr.queue:
             q = self.whisparr.queue[info["id"]]
             st.update(status="downloading", progress=q["progress"], timeleft=q["timeleft"])
@@ -896,7 +1176,22 @@ class App:
             st["status"] = "declined"
         elif req and req["status"] == "failed":
             st["status"] = "failed"
+        elif req and req["status"] == "abandoned":
+            st["status"] = "abandoned"
         return st
+
+    def stalled_days(self, row, st):
+        """Days an approved request has waited for a release, once that's too long; else 0."""
+        if row.get("status") != "approved" or st["status"] != "processing":
+            return 0
+        start = max(row.get("decided_at") or row["created"], row.get("searched_at") or 0)
+        days = (now() - start) // 86400
+        return days if days >= clamp_int(self.db.setting("stall_days"), 7, 1, 365) else 0
+
+    def decorate(self, row):
+        row["state"] = self.state(row["scene_id"], row)
+        row["stalled_days"] = self.stalled_days(row, row["state"])
+        return row
 
     # -- requests -----------------------------------------------------------------------
     def request_scene(self, user, scene_id):
@@ -911,17 +1206,30 @@ class App:
                               (scene_id,))
         if pending:
             raise ApiError(409, "This scene is already waiting for approval.")
-        image = pick_image(scene.get("images"), landscape=True)
-        rid = self.db.run(
-            "INSERT INTO requests(scene_id, title, studio, release_date, image, user_id, status, created) "
-            "VALUES (?,?,?,?,?,?, 'pending', ?)",
-            (scene_id, scene.get("title") or "", (scene.get("studio") or {}).get("name", ""),
-             scene.get("release_date") or "", image, user["id"], now()))
-        if user["is_admin"] or user["auto_approve"]:
-            self.approve(user, rid)
-        return self.request_row(rid)
+        return self.create_request(user, scene, approve=bool(user["is_admin"] or user["auto_approve"]))
 
-    def approve(self, user, rid):
+    def create_request(self, user, scene, approve=False, watch=None):
+        """A request for a StashDB scene: approved and sent to Whisparr, or pending.
+
+        From a saved search (watch), a request Whisparr can't take is removed again
+        (the search tries later) and nobody is told it failed."""
+        rid = self.db.run(
+            "INSERT INTO requests(scene_id, title, studio, release_date, image, user_id, status, "
+            "created, via, watch_id) VALUES (?,?,?,?,?,?, 'pending', ?,?,?)",
+            (scene["id"], scene.get("title") or "", (scene.get("studio") or {}).get("name", ""),
+             scene.get("release_date") or "", pick_image(scene.get("images"), landscape=True),
+             user["id"], now(), watch["name"] if watch else "", watch["id"] if watch else None))
+        if not approve:
+            self.notify.send("pending", self.request_row(rid))
+            return self.request_row(rid)
+        try:
+            return self.approve(user, rid, event="watch" if watch else "auto", quiet=bool(watch))
+        except ApiError:
+            if watch:
+                self.db.run("DELETE FROM requests WHERE id = ?", (rid,))
+            raise
+
+    def approve(self, user, rid, event="approved", quiet=False):
         req = self.db.one("SELECT * FROM requests WHERE id = ?", (rid,))
         if not req:
             raise ApiError(404, "No such request.")
@@ -931,46 +1239,105 @@ class App:
         except ApiError as e:
             self.db.run("UPDATE requests SET status = 'failed', error = ?, decided_by = ?, decided_at = ? "
                         "WHERE id = ?", (e.message, user["id"], now(), rid))
+            if not quiet:
+                self.notify.send("failed", self.request_row(rid))
             raise
         self.db.run("UPDATE requests SET status = 'approved', error = '', whisparr_id = ?, decided_by = ?, "
-                    "decided_at = ? WHERE id = ?", (wid, user["id"], now(), rid))
-        return self.request_row(rid)
+                    "decided_at = ?, notified = '', searched_at = NULL WHERE id = ?",
+                    (wid, user["id"], now(), rid))
+        row = self.request_row(rid)
+        self.notify.send(event, row)
+        return row
 
     def decline(self, user, rid):
         self.db.run("UPDATE requests SET status = 'declined', decided_by = ?, decided_at = ? "
                     "WHERE id = ? AND status IN ('pending', 'failed')", (user["id"], now(), rid))
-        return self.request_row(rid)
-
-    def request_row(self, rid):
-        row = self.db.one(
-            "SELECT r.*, u.username AS requested_by, d.username AS decided_by_name FROM requests r "
-            "LEFT JOIN users u ON u.id = r.user_id LEFT JOIN users d ON d.id = r.decided_by "
-            "WHERE r.id = ?", (rid,))
-        if row:
-            self.whisparr.ensure_fresh()
-            row["state"] = self.state(row["scene_id"], row)
+        row = self.request_row(rid)
+        if row and row["status"] == "declined":
+            self.notify.send("declined", row)
         return row
 
-    def list_requests(self, user, which, page):
+    def search_again(self, rows):
+        """Search Whisparr's indexers again for approved requests still waiting; the
+        stalled clock starts over."""
+        self.whisparr.ensure_fresh()
+        rows = [r for r in rows if self.decorate(r)["state"]["status"] == "processing"]
+        if not rows:
+            raise ApiError(409, "Nothing to search for: these aren't waiting for a release.")
+        self.whisparr.search([r["state"]["whisparr_id"] for r in rows])
+        for r in rows:
+            notified = ",".join(x for x in r["notified"].split(",") if x and x != "stalled")
+            self.db.run("UPDATE requests SET searched_at = ?, notified = ? WHERE id = ?",
+                        (now(), notified, r["id"]))
+        return len(rows)
+
+    def give_up(self, user, rid):
+        """Stop waiting for a release: Whisparr no longer wants the scene."""
+        row = self.request_row(rid)
+        if row["status"] != "approved" or row["state"]["status"] not in ("processing", "downloading"):
+            raise ApiError(409, "Only requests still waiting for a release can be given up.")
+        self.whisparr.unmonitor(row["state"]["whisparr_id"])
+        self.db.run("UPDATE requests SET status = 'abandoned', decided_by = ?, decided_at = ? "
+                    "WHERE id = ?", (user["id"], now(), rid))
+        return self.request_row(rid)
+
+    REQUEST_SQL = ("SELECT r.*, u.username AS requested_by, d.username AS decided_by_name "
+                   "FROM requests r LEFT JOIN users u ON u.id = r.user_id "
+                   "LEFT JOIN users d ON d.id = r.decided_by")
+
+    def request_row(self, rid):
+        row = self.db.one(self.REQUEST_SQL + " WHERE r.id = ?", (rid,))
+        if row:
+            self.whisparr.ensure_fresh()
+            self.decorate(row)
+        return row
+
+    def list_requests(self, user, which, page, per_page=30):
         where, args = [], []
         if not user["is_admin"]:
             where.append("r.user_id = ?")
             args.append(user["id"])
-        if which in ("pending", "approved", "declined", "failed"):
+        if which in ("pending", "approved", "declined", "failed", "abandoned"):
             where.append("r.status = ?")
             args.append(which)
-        sql = ("SELECT r.*, u.username AS requested_by, d.username AS decided_by_name FROM requests r "
-               "LEFT JOIN users u ON u.id = r.user_id LEFT JOIN users d ON d.id = r.decided_by")
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        total = self.db.one(f"SELECT COUNT(*) AS n FROM ({sql})", args)["n"]
-        rows = self.db.all(sql + " ORDER BY r.id DESC LIMIT 30 OFFSET ?", args + [(page - 1) * 30])
+        elif which in ("available", "stalled"):
+            where.append("r.status = 'approved'")
+        sql = self.REQUEST_SQL + (" WHERE " + " AND ".join(where) if where else "")
         self.whisparr.ensure_fresh()
-        for r in rows:
-            r["state"] = self.state(r["scene_id"], r)
-        if which == "available":
-            rows = [r for r in rows if r["state"]["status"] == "available"]
-        return {"count": total, "requests": rows}
+        if which in ("available", "stalled"):
+            # Whisparr's state, not ours: filter them all, then take the page.
+            rows = [self.decorate(r) for r in self.db.all(sql + " ORDER BY r.id DESC", args)]
+            rows = [r for r in rows if (r["state"]["status"] == "available" if which == "available"
+                                        else r["stalled_days"])]
+            start = (page - 1) * per_page
+            return {"count": len(rows), "requests": rows[start:start + per_page]}
+        total = self.db.one(f"SELECT COUNT(*) AS n FROM ({sql})", args)["n"]
+        rows = self.db.all(sql + " ORDER BY r.id DESC LIMIT ? OFFSET ?",
+                           args + [per_page, (page - 1) * per_page])
+        return {"count": total, "requests": [self.decorate(r) for r in rows]}
+
+    def check_requests(self):
+        """Push once when an approved request's scene arrives, or when it has waited too
+        long for a release. Files older than AVAILABLE_WINDOW (say, from before the update
+        that brought pushes) are only marked."""
+        for row in self.db.all(self.REQUEST_SQL + " WHERE r.status = 'approved'"):
+            notified = set(filter(None, row["notified"].split(",")))
+            self.decorate(row)
+            event = extra = None
+            if row["state"]["status"] == "available" and "available" not in notified:
+                info = self.whisparr.lookup(row["scene_id"]) or {}
+                if now() - iso_time(info.get("file_added")) < AVAILABLE_WINDOW:
+                    event = "available"
+                notified.add("available")
+            elif row["stalled_days"] and "stalled" not in notified:
+                event, extra = "stalled", f"No release found in {row['stalled_days']} days."
+                notified.add("stalled")
+            else:
+                continue
+            self.db.run("UPDATE requests SET notified = ? WHERE id = ?",
+                        (",".join(sorted(notified)), row["id"]))
+            if event:
+                self.notify.send(event, row, extra)
 
     def pending_count(self):
         return self.db.one("SELECT COUNT(*) AS n FROM requests WHERE status = 'pending'")["n"]
@@ -1014,7 +1381,13 @@ class App:
 
     def browse_scenes(self, q):
         inp = self.scene_input(q)
-        result = self.stash.query_scenes(inp)
+        result, scenes = self.filtered_scenes(q, inp)
+        return {"count": result["count"], "scenes": self.annotate(scenes), "page": inp["page"],
+                "per_page": inp["per_page"]}
+
+    def filtered_scenes(self, q, inp, ttl=300):
+        """StashDB's answer to a scene query, and its scenes without the left-out tags."""
+        result = self.stash.query_scenes(inp, ttl)
         scenes = result["scenes"]
         not_tags = set(id_list(q.get("not_tags")))
         if not_tags and inp.get("tags", {}).get("modifier") != "EXCLUDES":
@@ -1022,8 +1395,7 @@ class App:
             # short. The scene cards carry no tags, so fetch them.
             full = self.scene_tags([s["id"] for s in scenes])
             scenes = [s for s in scenes if not (set(full.get(s["id"], [])) & not_tags)]
-        return {"count": result["count"], "scenes": self.annotate(scenes), "page": inp["page"],
-                "per_page": inp["per_page"]}
+        return result, scenes
 
     def scene_tags(self, ids):
         found = self.stash.find_many("findScene", ids, "{ id tags { id } }")
@@ -1072,7 +1444,7 @@ class App:
         mine = self.db.all("SELECT * FROM requests WHERE user_id = ? ORDER BY id DESC LIMIT 12",
                            (user["id"],))
         for r in mine:
-            r["state"] = self.state(r["scene_id"], r)
+            self.decorate(r)
         return {"rows": rows, "requests": mine, "followed": self.whisparr.followed,
                 "whisparr_error": self.whisparr.error}
 
@@ -1090,6 +1462,8 @@ class App:
         self.whisparr.ensure_fresh()
         scene["state"] = self.state(scene_id, req)
         scene["request"] = self.request_row(req["id"]) if req else None
+        if scene["request"]:
+            scene["state"] = scene["request"]["state"]
         scene["stashdb_url"] = f"{STASHDB_WEB}/scenes/{scene_id}"
         return scene
 
@@ -1180,6 +1554,152 @@ class App:
                 out["follow_error"] = e.message
         return out
 
+    # -- saved searches ---------------------------------------------------------------
+    # A saved search is the Scenes page's filters plus a date: every hour, scenes released
+    # since then that match (also older ones newly tagged to match) are requested as their
+    # owner, so the usual approval applies, or always left pending with "ask first".
+
+    WATCH_FILTERS = ("q", "tags", "tag_mode", "not_tags", "performers", "performer_mode",
+                     "studios", "sub_studios", "favorites")
+
+    def watch_query(self, query):
+        q = {k: v for k, v in urllib.parse.parse_qsl(str(query or "")) if k in self.WATCH_FILTERS}
+        if not (q.get("q") or id_list(q.get("tags")) or id_list(q.get("performers"))
+                or id_list(q.get("studios")) or q.get("favorites") in ("PERFORMER", "STUDIO", "ALL")):
+            raise ApiError(400, "Pick a tag, performer, studio, favourites or title words first; "
+                                "without one, a saved search would request every new scene.")
+        return q
+
+    def watches(self, user):
+        sql = ("SELECT w.*, u.username AS owner, "
+               "(SELECT COUNT(*) FROM requests r WHERE r.watch_id = w.id) AS requests, "
+               "(SELECT COUNT(*) FROM watch_scenes x WHERE x.watch_id = w.id AND x.done = 0) AS waiting "
+               "FROM watches w JOIN users u ON u.id = w.user_id")
+        if user["is_admin"]:
+            return self.db.all(sql + " ORDER BY w.name COLLATE NOCASE")
+        return self.db.all(sql + " WHERE w.user_id = ? ORDER BY w.name COLLATE NOCASE", (user["id"],))
+
+    def watch(self, user, wid):
+        w = self.db.one("SELECT * FROM watches WHERE id = ?", (wid,))
+        if not w or not (user["is_admin"] or w["user_id"] == user["id"]):
+            raise ApiError(404, "No such saved search.")
+        return w
+
+    def save_watch(self, user, body, wid=None):
+        values = {}
+        if wid is None or "query" in body:
+            q = self.watch_query(body.get("query"))
+            values["query"] = urllib.parse.urlencode(q)
+            values["summary"] = str(body.get("summary") or "")[:300]
+        if wid is None or "name" in body:
+            name = str(body.get("name") or "").strip()[:80]
+            if not name:
+                raise ApiError(400, "Give the saved search a name.")
+            values["name"] = name
+        if wid is None or "since" in body:
+            since = str(body.get("since") or today())
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+                raise ApiError(400, "The date looks like 2026-11-07.")
+            values["since"] = since
+        for key in ("ask_first", "enabled"):
+            if key in body:
+                values[key] = int(bool(body[key]))
+        if wid is None:
+            values.update(user_id=user["id"], created=now())
+            cols = ", ".join(values)
+            wid = self.db.run(f"INSERT INTO watches({cols}) VALUES ({','.join('?' * len(values))})",
+                              list(values.values()))
+        elif values:
+            if {"query", "since"} & values.keys():
+                values["cursor"] = ""     # look through the matches again
+            sets = ", ".join(f"{k} = ?" for k in values)
+            self.db.run(f"UPDATE watches SET {sets} WHERE id = ?", list(values.values()) + [wid])
+        return self.watch(user, wid)
+
+    def check_watches(self):
+        """The saved searches due for a check (from the background refresher)."""
+        due = self.db.all("SELECT id FROM watches WHERE enabled = 1 AND checked < ? ORDER BY checked",
+                          (now() - WATCH_EVERY,))
+        for w in due:
+            try:
+                self.check_watch(w["id"])
+            except ApiError:
+                pass  # kept with the saved search, shown on its page
+
+    def check_watch(self, wid):
+        """Look for new matches and request them. Returns what was done, for "Check now"."""
+        with self.watch_lock:
+            w = self.db.one("SELECT * FROM watches WHERE id = ?", (wid,))
+            if not w:
+                return {}
+            try:
+                found = self.watch_matches(w)
+                done = self.watch_requests(w)
+            except ApiError as e:
+                self.db.run("UPDATE watches SET checked = ?, error = ? WHERE id = ?",
+                            (now(), e.message, wid))
+                raise
+            self.db.run("UPDATE watches SET checked = ?, error = '' WHERE id = ?", (now(), wid))
+            return dict(done, found=found)
+
+    def watch_matches(self, w):
+        """Note the scenes matching since the last check: newest changes first, until the
+        ones seen last time. Returns how many were new."""
+        q = self.watch_query(w["query"])
+        inp = self.scene_input(q)
+        inp.update(per_page=100, sort="UPDATED_AT", direction="DESC",
+                   date={"value": day_before(w["since"]), "modifier": "GREATER_THAN"})
+        newest, found = w["cursor"], 0
+        for page in range(1, WATCH_PAGES + 1):
+            inp["page"] = page
+            result, scenes = self.filtered_scenes(q, inp, ttl=0)
+            for sc in scenes:
+                if not self.db.one("SELECT 1 AS x FROM watch_scenes WHERE watch_id = ? AND scene_id = ?",
+                                   (w["id"], sc["id"])):
+                    self.db.run("INSERT INTO watch_scenes(watch_id, scene_id, card, seen) VALUES (?,?,?,?)",
+                                (w["id"], sc["id"], json.dumps(sc), now()))
+                    found += 1
+            stamps = [sc.get("updated") or "" for sc in result["scenes"]]
+            newest = max([newest] + stamps)
+            if len(result["scenes"]) < inp["per_page"] or (w["cursor"] and min(stamps) <= w["cursor"]):
+                break
+        self.db.run("UPDATE watches SET cursor = ? WHERE id = ?", (newest, w["id"]))
+        return found
+
+    def watch_requests(self, w):
+        """Request the noted scenes not wanted or asked for yet."""
+        owner = self.db.one("SELECT id, username, is_admin, auto_approve FROM users WHERE id = ?",
+                            (w["user_id"],))
+        approve = bool(owner["is_admin"] or owner["auto_approve"]) and not w["ask_first"]
+        todo = self.db.all("SELECT * FROM watch_scenes WHERE watch_id = ? AND done = 0 ORDER BY seen",
+                           (w["id"],))
+        self.whisparr.ensure_fresh()
+        requested = waiting = 0
+
+        def mark(row, done):
+            self.db.run("UPDATE watch_scenes SET done = ? WHERE watch_id = ? AND scene_id = ?",
+                        (done, w["id"], row["scene_id"]))
+
+        for row in todo:
+            asked = self.db.one("SELECT id FROM requests WHERE scene_id = ?", (row["scene_id"],))
+            if asked or self.state(row["scene_id"])["status"] != "none":
+                mark(row, 1)
+                continue
+            if requested >= WATCH_MAX_REQUESTS:
+                waiting += 1
+                continue
+            try:
+                self.create_request(owner, json.loads(row["card"]), approve=approve, watch=w)
+            except NotInWhisparr:
+                if now() - row["seen"] > WATCH_RETRY_DAYS * 86400:
+                    mark(row, 2)
+                else:
+                    waiting += 1
+                continue
+            requested += 1
+            mark(row, 1)
+        return {"requested": requested, "waiting": waiting}
+
     # -- settings -----------------------------------------------------------------------
     def public_settings(self):
         s = self.db.settings()
@@ -1192,13 +1712,32 @@ class App:
             "quality_profile_id": s["quality_profile_id"],
             "root_folder": s["root_folder"],
             "search_on_request": s["search_on_request"] == "1",
+            "stall_days": clamp_int(s["stall_days"], 7, 1, 365),
             "tab_title": s["tab_title"],
+            "notify_server": s["notify_server"],
+            "notify_topic": s["notify_topic"],
+            "notify_events": [e for e in s["notify_events"].split(",") if e in NOTIFY_EVENTS],
+            "notify_discreet": s["notify_discreet"] == "1",
+            "notify_error": self.notify.error,
+            "app_url": s["app_url"],
+            "seen_origin": s.get("seen_origin", ""),
+            "jellyfin_url": s["jellyfin_url"],
+            "jellyfin_key_set": bool(s["jellyfin_key"]),
+            "jellyfin_link": s["jellyfin_link"],
         }
+        tb_server, tb_topic = torrent_box_ntfy(self.notify.conf_dir)
+        out["torrent_box_ntfy"] = tb_server if tb_topic else ""
         try:
             profiles, roots = self.whisparr.options()
             out["profiles"], out["roots"] = profiles, roots
         except ApiError as e:
             out["whisparr_error"] = e.message
+        if s["jellyfin_key"]:
+            try:
+                self.jellyfin.refresh()
+                out["jellyfin_videos"] = len(self.jellyfin.paths)
+            except ApiError as e:
+                out["jellyfin_error"] = e.message
         return out
 
     def save_settings(self, body):
@@ -1222,17 +1761,55 @@ class App:
             allowed["root_folder"] = str(body["root_folder"] or "")
         if "search_on_request" in body:
             allowed["search_on_request"] = "1" if body["search_on_request"] else "0"
+        if "stall_days" in body:
+            allowed["stall_days"] = str(clamp_int(body["stall_days"], 7, 1, 365))
         if "tab_title" in body:
             allowed["tab_title"] = (str(body["tab_title"]).strip() or "Desireerr")[:40]
+        for key in ("notify_server", "app_url", "jellyfin_link"):
+            if key in body:
+                allowed[key] = web_address(body[key])
+        if "jellyfin_url" in body:
+            allowed["jellyfin_url"] = web_address(body["jellyfin_url"]) or DEFAULT_JELLYFIN
+        if "notify_topic" in body:
+            topic = str(body["notify_topic"] or "").strip()
+            if topic and not re.fullmatch(r"[\w-]{1,64}", topic):
+                raise ApiError(400, "ntfy topics are letters, digits, - and _ (up to 64).")
+            allowed["notify_topic"] = topic
+        if isinstance(body.get("notify_events"), list):
+            allowed["notify_events"] = ",".join(e for e in NOTIFY_EVENTS if e in body["notify_events"])
+        if "notify_discreet" in body:
+            allowed["notify_discreet"] = "1" if body["notify_discreet"] else "0"
+        if "jellyfin_key" in body and body["jellyfin_key"] is not None:
+            allowed["jellyfin_key"] = str(body["jellyfin_key"]).strip()
         self.db.set_settings(allowed)
         if {"whisparr_url", "whisparr_key"} & allowed.keys():
             self.whisparr.index_time = 0
             self.whisparr.queue_time = 0
+        if {"jellyfin_url", "jellyfin_key"} & allowed.keys():
+            self.jellyfin.time = self.jellyfin.tried = 0
         return self.public_settings()
+
+    def remember_origin(self, origin):
+        """Where the app is opened, for links in pushes while no address is set."""
+        if origin and self.db.setting("seen_origin") != origin:
+            self.db.set_settings({"seen_origin": origin})
 
 
 def tomorrow():
     return date.fromordinal(date.today().toordinal() + 1).isoformat()
+
+
+def day_before(day):
+    return date.fromordinal(date.fromisoformat(day).toordinal() - 1).isoformat()
+
+
+def iso_time(value):
+    """Whisparr's and StashDB's ISO times ("2026-11-05T10:22:33.123Z", UTC) -> Unix time; 0
+    if there's none."""
+    try:
+        return int(datetime.fromisoformat(str(value)[:19]).replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return 0
 
 
 def pick_image(images, landscape=True):
@@ -1311,6 +1888,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def client_ip(self):
         return self.client_address[0]
+
+    def origin(self):
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+        proto = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+        return f"{proto}://{host}" if re.fullmatch(r"[\w.-]+(:\d+)?|\[[\w:.]+\](:\d+)?", host) else ""
 
     # -- dispatch -----------------------------------------------------------------------
     def do_GET(self):
@@ -1398,9 +1980,16 @@ class Handler(BaseHTTPRequestHandler):
         # -- open routes --
         if key == ("GET", "status"):
             admin_user = bool(user and user["is_admin"])
-            return 200, {"setup_needed": app.setup_needed(), "user": user, "version": VERSION,
-                         "pending": app.pending_count() if admin_user else 0,
-                         "whisparr_url": app.whisparr.web_url() if admin_user else None}, None
+            out = {"setup_needed": app.setup_needed(), "user": user, "version": VERSION,
+                   "pending": app.pending_count() if admin_user else 0,
+                   "whisparr_url": app.whisparr.web_url() if admin_user else None}
+            if user:
+                app.remember_origin(self.origin())
+                app.jellyfin.ensure()
+                if app.jellyfin.creds()[1] and app.jellyfin.server_id:
+                    out["jellyfin"] = {"server_id": app.jellyfin.server_id,
+                                       "link": app.db.setting("jellyfin_link")}
+            return 200, out, None
         if key == ("POST", "setup"):
             if not app.setup_needed():
                 raise ApiError(409, "Setup is done already. Sign in instead.")
@@ -1488,22 +2077,49 @@ class Handler(BaseHTTPRequestHandler):
         if key == ("GET", "requests"):
             return 200, app.list_requests(user, q.get("filter", "all"),
                                           clamp_int(q.get("page"), 1, 1, 10000)), None
+        if key == ("POST", "requests") and parts[1:] == ["search-stalled"]:
+            admin()
+            rows = app.list_requests(user, "stalled", 1, per_page=10000)["requests"]
+            return 200, {"searched": app.search_again(rows)}, None
         if parts[:1] == ["requests"] and len(parts) >= 2 and parts[1].isdigit():
             rid = int(parts[1])
             row = app.db.one("SELECT * FROM requests WHERE id = ?", (rid,))
             if not row:
                 raise ApiError(404, "No such request.")
+            own = row["user_id"] == user["id"]
             if method == "POST" and parts[2:] == ["approve"]:
                 admin()
                 return 200, app.approve(user, rid), None
             if method == "POST" and parts[2:] == ["decline"]:
                 admin()
                 return 200, app.decline(user, rid), None
+            if method == "POST" and parts[2:] in (["search"], ["give-up"]):
+                if not (user["is_admin"] or own):
+                    raise ApiError(403, "Only admins can do that to someone else's request.")
+                if parts[2] == "search":
+                    app.search_again([app.request_row(rid)])
+                    return 200, app.request_row(rid), None
+                return 200, app.give_up(user, rid), None
             if method == "DELETE" and len(parts) == 2:
                 if not user["is_admin"] and not (row["user_id"] == user["id"] and row["status"] == "pending"):
                     raise ApiError(403, "You can only cancel your own pending requests.")
                 app.db.run("DELETE FROM requests WHERE id = ?", (rid,))
                 return 200, {"ok": True}, None
+
+        # -- saved searches (each user their own; admins see all) --
+        if key == ("GET", "watches"):
+            return 200, {"watches": app.watches(user)}, None
+        if key == ("POST", "watches") and len(parts) == 1:
+            return 200, app.save_watch(user, self.body_json()), None
+        if parts[:1] == ["watches"] and len(parts) >= 2 and parts[1].isdigit():
+            wid = app.watch(user, int(parts[1]))["id"]
+            if method == "PUT" and len(parts) == 2:
+                return 200, app.save_watch(user, self.body_json(), wid), None
+            if method == "DELETE" and len(parts) == 2:
+                app.db.run("DELETE FROM watches WHERE id = ?", (wid,))
+                return 200, {"ok": True}, None
+            if method == "POST" and parts[2:] == ["check"]:
+                return 200, app.check_watch(wid), None
 
         # -- account --
         if key == ("POST", "password"):
@@ -1556,8 +2172,19 @@ class Handler(BaseHTTPRequestHandler):
         if key == ("PUT", "settings"):
             admin()
             return 200, app.save_settings(self.body_json()), None
+        if key == ("POST", "notify-test"):
+            admin()
+            app.notify.test()
+            return 200, {"ok": True}, None
 
         raise ApiError(404, "No such API route.")
+
+
+def web_address(value):
+    url = str(value or "").strip().rstrip("/")
+    if url and not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", url):
+        raise ApiError(400, f"{url} isn't a web address (http://... or https://...).")
+    return url
 
 
 def html_escape(s):
@@ -1582,25 +2209,35 @@ class DualStackServer(Server):
 
 
 def refresher(app):
-    """Keep Whisparr's library index and queue fresh in the background."""
+    """Keep Whisparr's library index and queue fresh in the background, push about requests
+    that arrived or wait too long, and run the saved searches that are due."""
     while True:
         try:
             app.whisparr.refresh_index()
             app.whisparr.refresh_queue()
             app.whisparr.refresh_followed()
+            app.check_requests()
         except ApiError as e:
             app.whisparr.error = e.message
         except Exception as e:
             print(f"refresh failed: {e!r}", file=sys.stderr, flush=True)
+        try:
+            app.check_watches()
+        except ApiError as e:
+            print(f"saved search: {e.message}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"saved search failed: {e!r}", file=sys.stderr, flush=True)
         time.sleep(INDEX_MAX_AGE)
 
 
-def init(app, user="", password="", stashdb_key=""):
-    """Set up the admin and the StashDB key from outside, e.g. from torrent-box's setup.
+def init(app, user="", password="", stashdb_key="", jellyfin_key=""):
+    """Set up the admin, the StashDB key and a Jellyfin API key from outside, e.g. from
+    torrent-box's setup.
 
     The admin gets a login shared with other apps; a salted hash of it is kept, so a later
     run can tell whether that login changed (then the admin follows it) without storing it.
-    An admin made on the first visit and a key set in Settings are never overwritten.
+    An admin made on the first visit and a key set in Settings are never overwritten; a
+    Jellyfin key given here before is replaced by a new one.
     Returns what was done, one line each.
     """
     db, done = app.db, []
@@ -1647,6 +2284,15 @@ def init(app, user="", password="", stashdb_key=""):
         done.append("StashDB key: up to date")
     else:
         done.append("no StashDB key yet: add it in Desireerr's Settings")
+    if jellyfin_key:
+        saved, given = db.setting("jellyfin_key"), db.setting("jellyfin_key_managed")
+        if saved == jellyfin_key:
+            done.append("Jellyfin key: up to date")
+        elif not saved or saved == given:
+            db.set_settings({"jellyfin_key": jellyfin_key, "jellyfin_key_managed": jellyfin_key})
+            done.append("Jellyfin key: set (available scenes get a Watch button)")
+        else:
+            done.append("Jellyfin key: keeps the one set in Desireerr")
     if not app.setup_needed():
         (app.data_dir / "setup-code").unlink(missing_ok=True)
     return done
@@ -1656,7 +2302,7 @@ def cmd_init(argv):
     p = argparse.ArgumentParser(prog="desireerr.py init", description=(
         "Set up the admin and the StashDB key without the first-visit page. The secrets come "
         "from the environment: DESIREERR_ADMIN_USER, DESIREERR_ADMIN_PASSWORD, "
-        "DESIREERR_STASHDB_KEY (each optional)."))
+        "DESIREERR_STASHDB_KEY, DESIREERR_JELLYFIN_KEY (each optional)."))
     p.add_argument("--data", default=os.environ.get(
         "DESIREERR_DATA", Path.home() / ".local/state/desireerr"))
     args = p.parse_args(argv)
@@ -1664,7 +2310,8 @@ def cmd_init(argv):
     try:
         done = init(app, os.environ.get("DESIREERR_ADMIN_USER", "").strip(),
                     os.environ.get("DESIREERR_ADMIN_PASSWORD", ""),
-                    os.environ.get("DESIREERR_STASHDB_KEY", "").strip())
+                    os.environ.get("DESIREERR_STASHDB_KEY", "").strip(),
+                    os.environ.get("DESIREERR_JELLYFIN_KEY", "").strip())
     except ApiError as e:
         print(f"desireerr init: {e.message}", file=sys.stderr)
         return 1

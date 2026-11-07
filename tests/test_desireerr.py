@@ -10,6 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import desireerr as d  # noqa: E402
 
+# Never read the real torrent-box's ntfy topic (or push to it) from a test.
+d.TORRENT_BOX_CONF = Path(tempfile.gettempdir()) / "desireerr-tests-no-torrent-box"
+d.WHISPARR_CONFIG = d.TORRENT_BOX_CONF / "config.xml"
+
 
 class FakeWhisparr(d.Whisparr):
     """Whisparr's API as a dict of (method, path) -> handler; records every call."""
@@ -33,9 +37,19 @@ class FakeWhisparr(d.Whisparr):
 class FakeStash:
     def __init__(self, scenes):
         self.scenes = scenes
+        self.listed = []         # what query_scenes answers: scene cards, newest change first
+        self.queries = []
 
     def find_scene(self, sid):
         return self.scenes.get(sid)
+
+    def query_scenes(self, inp, ttl=300):
+        self.queries.append(dict(inp))
+        start = (inp["page"] - 1) * inp["per_page"]
+        return {"count": len(self.listed), "scenes": self.listed[start:start + inp["per_page"]]}
+
+    def find_many(self, field, ids, selection, fragments="", ttl=300):
+        return [{"id": i, "tags": []} for i in ids]   # no scene has a left-out tag
 
 
 SCENE = "11111111-2222-3333-4444-555555555555"
@@ -54,6 +68,9 @@ def make_app(tmp, routes=None):
     app.whisparr = FakeWhisparr(app.db, routes or {})
     app.whisparr.index_time = app.whisparr.queue_time = 9e18  # never refresh on its own
     app.stash = FakeStash({SCENE: scene(), OTHER: scene(OTHER)})
+    app.notify.background = False
+    app.pushes = []
+    app.notify.post = lambda server, body: app.pushes.append((server, body)) or True
     return app
 
 
@@ -460,6 +477,383 @@ class Http(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/settings")[0], 403)
         self.assertEqual(self.req("POST", "/api/follow", {"kind": "performer", "id": SCENE, "follow": True})[0], 403)
         self.assertEqual(self.req("POST", "/api/favorite", {"kind": "performer", "id": SCENE, "favorite": True})[0], 403)
+        self.assertEqual(self.req("POST", "/api/notify-test")[0], 403)
+        self.assertEqual(self.req("POST", "/api/requests/search-stalled")[0], 403)
+
+    def test_saved_searches_over_http(self):
+        self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
+        status, w = self.req("POST", "/api/watches", {"name": "Mine", "query": f"tags={TAG}"})
+        self.assertEqual((status, w["since"]), (200, d.today()))
+        self.assertEqual(self.req("PUT", f"/api/watches/{w['id']}", {"ask_first": True})[1]["ask_first"], 1)
+        self.assertEqual(len(self.req("GET", "/api/watches")[1]["watches"]), 1)
+        self.req("POST", "/api/users", {"username": "guest", "password": "password1"})
+        self.req("POST", "/api/logout")
+        self.req("POST", "/api/login", {"username": "guest", "password": "password1"})
+        self.assertEqual(self.req("GET", "/api/watches")[1]["watches"], [])
+        self.assertEqual(self.req("DELETE", f"/api/watches/{w['id']}")[0], 404)
+
+    def test_status_remembers_where_the_app_is_opened(self):
+        self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
+        self.req("GET", "/api/status")
+        self.assertEqual(self.app.db.setting("seen_origin"), f"http://127.0.0.1:{self.port}")
+
+
+class Base(unittest.TestCase):
+    """An app with a Whisparr that takes any scene, an admin, a user and an ntfy topic."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.added, self.commands, self.puts = [], [], []
+        self.movies = {}
+        routes = {
+            ("GET", "movie"): [],
+            ("GET", "lookup/scene"): self.lookup,
+            ("POST", "movie"): self.add_movie,
+            ("POST", "command"): lambda b, p: self.commands.append(b) or {},
+            ("GET", "qualityprofile"): [{"id": 1, "name": "Any"}],
+            ("GET", "rootfolder"): [{"path": "/x/HD"}],
+            ("GET", "studio"): [{"qualityProfileId": 1}],
+        }
+        self.unknown = set()     # scenes Whisparr's metadata doesn't have
+        self.app = make_app(self.tmp.name, routes)
+        self.app.db.set_settings({"notify_topic": "topic", "notify_server": "http://ntfy"})
+        self.admin = self.user_row(self.app.create_user("boss", "password1", is_admin=True))
+        self.user = self.user_row(self.app.create_user("guest", "password1"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def user_row(self, uid):
+        return self.app.db.one("SELECT id, username, is_admin, auto_approve FROM users WHERE id = ?", (uid,))
+
+    def lookup(self, body, params):
+        sid = params["term"][6:]
+        if sid in self.unknown:
+            return []
+        return [{"foreignId": sid, "movie": {"title": "A scene", "foreignId": sid, "itemType": "scene"}}]
+
+    def add_movie(self, body, params):
+        self.added.append(body)
+        mid = 40 + len(self.added)
+        self.movies[mid] = dict(body, id=mid)
+        self.app.whisparr.routes[("GET", f"movie/{mid}")] = lambda b, p: dict(self.movies[mid])
+        self.app.whisparr.routes[("PUT", f"movie/{mid}")] = lambda b, p: self.puts.append(b) or b
+        return {"id": mid}
+
+    def events(self):
+        return [b["title"] for _, b in self.app.pushes]
+
+    def make_available(self, sid, added="2026-11-07T10:00:00Z", path="/mnt/storage/XXX/HD/a/a.mp4"):
+        self.app.whisparr.index[sid].update(has_file=True, file_added=added, path=path)
+
+
+class Notifications(Base):
+    def test_discreet_by_default(self):
+        self.app.db.set_settings({"seen_origin": "http://box:5056", "tab_title": "Notes"})
+        self.app.request_scene(self.user, SCENE)
+        (server, body), = self.app.pushes
+        self.assertEqual(server, "http://ntfy")
+        self.assertEqual(body, {"topic": "topic", "title": "Notes", "message": "A request is waiting for approval.",
+                                "click": "http://box:5056/requests"})
+
+    def test_like_seerr_when_not_discreet(self):
+        self.app.db.set_settings({"notify_discreet": "0", "app_url": "https://desire.example/"})
+        r = self.app.request_scene(self.user, SCENE)
+        body = self.app.pushes[0][1]
+        self.assertEqual(body["title"], "New Scene Request")
+        self.assertEqual(body["message"], "A scene\nStudio · 2026-11-01\n\nRequested by: guest")
+        self.assertEqual(body["attach"], "https://cdn.stashdb.org/a?size=600")
+        self.assertEqual(body["click"], f"https://desire.example/scene/{SCENE}")
+        self.app.db.set_settings({"notify_events": "declined"})
+        self.app.decline(self.admin, r["id"])
+        self.assertEqual(self.app.pushes[1][1]["title"], "Scene Request Declined")
+        self.assertIn("Declined by: boss", self.app.pushes[1][1]["message"])
+
+    def test_chosen_events_only(self):
+        self.app.request_scene(self.admin, SCENE)          # "auto": off by default
+        self.assertEqual(self.app.pushes, [])
+        self.app.db.set_settings({"notify_events": "auto"})
+        self.app.request_scene(self.admin, OTHER)
+        self.assertEqual(len(self.app.pushes), 1)
+
+    def test_failed_request(self):
+        self.unknown.add(SCENE)
+        with self.assertRaises(d.NotInWhisparr):
+            self.app.request_scene(self.admin, SCENE)
+        self.assertEqual(self.app.pushes[0][1]["message"], "A request failed.")
+
+    def test_no_topic_no_push(self):
+        self.app.db.set_settings({"notify_topic": "", "notify_server": ""})
+        self.app.request_scene(self.user, SCENE)
+        self.assertEqual(self.app.pushes, [])
+
+    def test_torrent_box_topic_is_used(self):
+        conf = Path(self.tmp.name) / "tb"
+        conf.mkdir()
+        (conf / "config.ini").write_text("[ntfy]\nserver = http://localhost:2586\n")
+        (conf / "secrets.ini").write_text("[secrets]\nntfy_topic = torrent-box-abc\n")
+        self.assertEqual(d.torrent_box_ntfy(conf), ("http://localhost:2586", "torrent-box-abc"))
+        self.app.db.set_settings({"notify_topic": "", "notify_server": ""})
+        self.app.notify.conf_dir = conf
+        self.app.request_scene(self.user, SCENE)
+        self.assertEqual(self.app.pushes[0][0], "http://localhost:2586")
+        self.assertEqual(self.app.pushes[0][1]["topic"], "torrent-box-abc")
+        (conf / "secrets.ini").write_text("[secrets]\n")
+        self.assertEqual(d.torrent_box_ntfy(conf), ("", ""))
+
+    def test_available_once_and_only_when_new(self):
+        self.app.request_scene(self.admin, SCENE)
+        self.app.request_scene(self.admin, OTHER)
+        recent = time_iso(d.now() - 3600)
+        self.make_available(SCENE, added=recent)
+        self.make_available(OTHER, added="2025-01-01T00:00:00Z")   # from before pushes existed
+        self.app.check_requests()
+        self.app.check_requests()
+        self.assertEqual(self.events(), ["Desireerr"])
+        self.assertEqual(self.app.pushes[0][1]["message"], "A request is ready.")
+        notified = {r["scene_id"]: r["notified"] for r in self.app.db.all("SELECT * FROM requests")}
+        self.assertEqual(notified, {SCENE: "available", OTHER: "available"})
+
+
+def time_iso(ts):
+    return d.datetime.fromtimestamp(ts, d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.123Z")
+
+
+class Stalled(Base):
+    def setUp(self):
+        super().setUp()
+        self.app.db.set_settings({"notify_discreet": "0", "stall_days": "7"})
+        self.rid = self.app.request_scene(self.admin, SCENE)["id"]
+        self.age(8)
+
+    def age(self, days):
+        self.app.db.run("UPDATE requests SET created = ?, decided_at = ?", (d.now() - days * 86400,) * 2)
+
+    def test_stalled_after_the_set_days(self):
+        self.assertEqual(self.app.request_row(self.rid)["stalled_days"], 8)
+        self.age(6)
+        self.assertEqual(self.app.request_row(self.rid)["stalled_days"], 0)
+
+    def test_downloading_is_not_stalled(self):
+        self.app.whisparr.queue[self.app.whisparr.index[SCENE]["id"]] = {"progress": 5, "status": "", "timeleft": ""}
+        self.assertEqual(self.app.request_row(self.rid)["stalled_days"], 0)
+
+    def test_pushed_once_then_again_after_a_new_search(self):
+        self.app.check_requests()
+        self.app.check_requests()
+        self.assertEqual(self.events(), ["Scene Request Still Waiting"])
+        self.assertIn("No release found in 8 days.", self.app.pushes[0][1]["message"])
+        self.app.search_again([self.app.request_row(self.rid)])
+        self.assertEqual(self.commands[-1], {"name": "MoviesSearch", "movieIds": [41]})
+        row = self.app.request_row(self.rid)
+        self.assertEqual((row["stalled_days"], row["notified"]), (0, ""))
+        self.app.db.run("UPDATE requests SET searched_at = ?", (d.now() - 8 * 86400,))
+        self.app.check_requests()
+        self.assertEqual(len(self.app.pushes), 2)
+
+    def test_stalled_tab(self):
+        self.app.request_scene(self.admin, OTHER)            # new: not stalled
+        listed = self.app.list_requests(self.admin, "stalled", 1)
+        self.assertEqual((listed["count"], listed["requests"][0]["id"]), (1, self.rid))
+        self.assertEqual(self.app.list_requests(self.admin, "approved", 1)["count"], 2)
+
+    def test_give_up(self):
+        row = self.app.give_up(self.admin, self.rid)
+        self.assertEqual((row["status"], row["state"]["status"]), ("abandoned", "abandoned"))
+        self.assertFalse(self.puts[-1]["monitored"])
+        self.assertFalse(self.app.whisparr.index[SCENE]["monitored"])
+        with self.assertRaises(d.ApiError):
+            self.app.give_up(self.admin, self.rid)
+        # and it can be asked for again
+        self.app.whisparr.routes[("GET", "movie")] = [{"id": 41, "stashId": SCENE}]
+        self.movies[41]["monitored"] = False
+        again = self.app.request_scene(self.admin, SCENE)
+        self.assertEqual(again["state"]["status"], "processing")
+
+    def test_search_again_needs_a_waiting_request(self):
+        self.make_available(SCENE)
+        with self.assertRaises(d.ApiError):
+            self.app.search_again([self.app.request_row(self.rid)])
+
+
+class Watches(Base):
+    def setUp(self):
+        super().setUp()
+        self.app.stash.listed = [card(SCENE, "2026-11-07T10:00:00Z"), card(OTHER, "2026-11-06T10:00:00Z")]
+
+    def save(self, user=None, **kw):
+        body = {"name": "Mine", "query": f"tags={TAG}&not_tags={TAG2}&page=4&sort=TITLE", "since": "2026-11-01"}
+        body.update(kw)
+        return self.app.save_watch(user or self.admin, body)
+
+    def test_needs_a_filter(self):
+        with self.assertRaises(d.ApiError):
+            self.save(query=f"not_tags={TAG}&sort=DATE")
+        w = self.save()
+        self.assertEqual(w["query"], f"tags={TAG}&not_tags={TAG2}")   # filters only
+
+    def test_requests_matches_as_its_owner(self):
+        self.app.scene_tags = lambda ids: {SCENE: [TAG], OTHER: [TAG, TAG2]}   # OTHER is left out
+        w = self.save()
+        out = self.app.check_watch(w["id"])
+        self.assertEqual(out, {"found": 1, "requested": 1, "waiting": 0})
+        q = self.app.stash.queries[0]
+        self.assertEqual((q["sort"], q["per_page"], q["date"]), ("UPDATED_AT", 100,
+                         {"value": "2026-10-31", "modifier": "GREATER_THAN"}))
+        r = self.app.db.one("SELECT * FROM requests")
+        self.assertEqual((r["scene_id"], r["status"], r["via"], r["watch_id"]), (SCENE, "approved", "Mine", w["id"]))
+        self.assertEqual(self.app.pushes[0][1]["message"], "A saved search made a request.")
+        # the next check finds nothing new and asks for nothing twice
+        self.assertEqual(self.app.check_watch(w["id"]), {"found": 0, "requested": 0, "waiting": 0})
+        self.assertEqual(self.app.db.one("SELECT cursor FROM watches")["cursor"], "2026-11-07T10:00:00Z")
+
+    def test_skips_wanted_and_asked_for(self):
+        self.app.request_scene(self.user, SCENE)            # already asked for
+        self.app.whisparr.index[OTHER] = {"id": 9, "monitored": True, "has_file": False}
+        self.app.check_watch(self.save()["id"])
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) AS n FROM requests")["n"], 1)
+
+    def test_ask_first_and_plain_users_leave_them_pending(self):
+        self.app.check_watch(self.save(ask_first=True)["id"])
+        self.assertEqual({r["status"] for r in self.app.db.all("SELECT * FROM requests")}, {"pending"})
+        self.app.db.run("DELETE FROM requests")
+        self.app.check_watch(self.save(user=self.user, name="Theirs")["id"])
+        rows = self.app.db.all("SELECT * FROM requests")
+        self.assertEqual({(r["status"], r["user_id"]) for r in rows}, {("pending", self.user["id"])})
+        self.assertEqual(self.added, [])
+
+    def test_scene_unknown_to_whisparr_is_tried_again(self):
+        self.unknown.add(SCENE)
+        w = self.save()
+        self.assertEqual(self.app.check_watch(w["id"])["waiting"], 1)
+        self.assertIsNone(self.app.db.one("SELECT * FROM requests WHERE scene_id = ?", (SCENE,)))
+        self.assertNotIn("Scene Request Failed", self.events())
+        self.unknown.clear()
+        self.assertEqual(self.app.check_watch(w["id"])["requested"], 1)
+
+    def test_gives_up_on_a_scene_after_two_weeks(self):
+        self.unknown.add(SCENE)
+        w = self.save()
+        self.app.check_watch(w["id"])
+        self.app.db.run("UPDATE watch_scenes SET seen = ? WHERE scene_id = ?", (d.now() - 15 * 86400, SCENE))
+        self.assertEqual(self.app.check_watch(w["id"])["waiting"], 0)
+        self.assertEqual(self.app.db.one("SELECT done FROM watch_scenes WHERE scene_id = ?", (SCENE,))["done"], 2)
+
+    def test_whisparr_down_is_kept_and_retried(self):
+        w = self.save()
+        self.app.whisparr.routes.pop(("POST", "movie"))
+        with self.assertRaises(d.ApiError):
+            self.app.check_watch(w["id"])
+        self.assertIn("unexpected", self.app.db.one("SELECT error FROM watches")["error"])
+        self.assertEqual(self.app.db.one("SELECT COUNT(*) AS n FROM requests")["n"], 0)
+        self.app.whisparr.routes[("POST", "movie")] = self.add_movie
+        self.assertEqual(self.app.check_watch(w["id"])["requested"], 2)
+        self.assertEqual(self.app.db.one("SELECT error FROM watches")["error"], "")
+
+    def test_pages_until_what_was_seen(self):
+        self.app.stash.listed = [card(f"{n:08d}-0000-0000-0000-000000000000", f"2026-11-07T{23 - n // 10:02d}:00:00Z")
+                                 for n in range(150)]
+        w = self.save()
+        self.assertEqual(self.app.check_watch(w["id"])["found"], 150)
+        self.assertEqual(len(self.app.stash.queries), 2)
+        self.app.stash.queries.clear()
+        self.app.check_watch(w["id"])
+        self.assertEqual(len(self.app.stash.queries), 1)     # the first page reaches the cursor
+
+    def test_due_ones_only(self):
+        w = self.save()
+        self.app.check_watches()
+        self.assertEqual(len(self.app.stash.queries), 1)
+        self.app.check_watches()
+        self.assertEqual(len(self.app.stash.queries), 1)      # checked within the hour
+        self.app.save_watch(self.admin, {"enabled": False}, w["id"])
+        self.app.db.run("UPDATE watches SET checked = 0")
+        self.app.check_watches()
+        self.assertEqual(len(self.app.stash.queries), 1)      # paused
+
+    def test_only_owners_and_admins(self):
+        w = self.save(user=self.user)
+        other = self.user_row(self.app.create_user("other", "password1"))
+        with self.assertRaises(d.ApiError):
+            self.app.watch(other, w["id"])
+        self.assertEqual(self.app.watch(self.admin, w["id"])["id"], w["id"])
+        self.assertEqual([x["name"] for x in self.app.watches(other)], [])
+
+
+TAG = "aaaaaaaa-0000-0000-0000-000000000001"
+TAG2 = "aaaaaaaa-0000-0000-0000-000000000002"
+
+
+def card(sid, updated):
+    return dict(scene(sid), updated=updated)
+
+
+class JellyfinLinks(Base):
+    def setUp(self):
+        super().setUp()
+        jf = self.app.jellyfin
+        self.calls = []
+
+        def call(path, timeout=20):
+            self.calls.append(path)
+            if path.startswith("System"):
+                return {"Id": "srv1"}
+            return {"Items": [{"Id": "jf1", "Path": "/mnt/storage/XXX/HD/a/a.mp4"},
+                              {"Id": "jf2", "Path": "/media/elsewhere/b.mp4"}]}
+        jf.call = call
+        self.app.db.set_settings({"jellyfin_key": "KEY"})
+
+    def test_found_by_path_or_file_name(self):
+        self.assertEqual(self.app.jellyfin.find("/mnt/storage/XXX/HD/a/a.mp4"), "jf1")
+        self.assertEqual(self.app.jellyfin.find("/mnt/storage/XXX/SD/b/b.mp4"), "jf2")
+        self.assertEqual(len(self.calls), 2)   # one refresh: info and items
+
+    def test_available_scenes_carry_it(self):
+        self.app.request_scene(self.admin, SCENE)
+        self.make_available(SCENE)
+        self.assertEqual(self.app.state(SCENE)["jellyfin_id"], "jf1")
+
+    def test_a_miss_refreshes_at_most_once_a_minute(self):
+        self.app.jellyfin.find("/x/a.mp4")
+        self.app.jellyfin.find("/x/c.mp4")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_without_a_key_nothing_is_asked(self):
+        self.app.db.set_settings({"jellyfin_key": ""})
+        self.assertIsNone(self.app.jellyfin.find("/mnt/storage/XXX/HD/a/a.mp4"))
+        self.assertEqual(self.calls, [])
+
+    def test_init_sets_the_key_and_follows_a_new_one(self):
+        self.app.db.set_settings({"jellyfin_key": ""})
+        self.assertIn("Jellyfin key: set (available scenes get a Watch button)", d.init(self.app, jellyfin_key="K1"))
+        self.assertIn("Jellyfin key: up to date", d.init(self.app, jellyfin_key="K1"))
+        d.init(self.app, jellyfin_key="K2")
+        self.assertEqual(self.app.db.setting("jellyfin_key"), "K2")
+        self.app.db.set_settings({"jellyfin_key": "MINE"})       # set in Settings by hand
+        self.assertIn("Jellyfin key: keeps the one set in Desireerr", d.init(self.app, jellyfin_key="K3"))
+        self.assertEqual(self.app.db.setting("jellyfin_key"), "MINE")
+
+
+class SettingsChecks(Base):
+    def test_addresses_and_topics_are_checked(self):
+        self.app.whisparr.routes[("GET", "qualityprofile")] = []
+        for body in ({"app_url": "javascript:alert(1)"}, {"notify_server": "ntfy.sh"},
+                     {"notify_topic": "has spaces"}, {"jellyfin_link": "http://a b"}):
+            with self.assertRaises(d.ApiError, msg=body):
+                self.app.save_settings(body)
+        out = self.app.save_settings({"app_url": "https://x.example/", "notify_events": ["available", "nope"],
+                                      "notify_discreet": False, "stall_days": "500"})
+        self.assertEqual((out["app_url"], out["notify_events"], out["notify_discreet"], out["stall_days"]),
+                         ("https://x.example", ["available"], False, 365))
+
+    def test_old_databases_get_the_new_columns(self):
+        path = Path(self.tmp.name) / "old.db"
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.executescript(d.SCHEMA.split("CREATE TABLE IF NOT EXISTS watches")[0])
+        conn.close()
+        cols = {r["name"] for r in d.DB(path).all("PRAGMA table_info(requests)")}
+        self.assertTrue({"via", "watch_id", "notified", "searched_at"} <= cols)
 
 
 if __name__ == "__main__":
