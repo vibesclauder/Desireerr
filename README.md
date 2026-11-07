@@ -1,7 +1,9 @@
 # Desireerr
 
-A Seerr-style request app for [StashDB](https://stashdb.org) scenes, on top of
-[Whisparr](https://github.com/Whisparr/Whisparr) v3. Browse and search StashDB, filter scenes
+A Seerr-style request app for adult scenes: [StashDB](https://stashdb.org), the community
+database of porn scenes, performers and studios, on top of
+[Whisparr](https://github.com/Whisparr/Whisparr) v3, the *arr for adult content (Radarr for
+porn). Browse and search StashDB, filter scenes
 by tags (all of them, any of them, or leave some out), performers, studios, dates and your
 StashDB favourites, then request scenes. Approved requests go to Whisparr, which searches
 Prowlarr and downloads them; each scene shows whether it's pending, requested, downloading
