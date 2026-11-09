@@ -71,6 +71,7 @@ NFO_MARK = "Desireerr"       # in the comment at the top of the .nfo files we wr
 SIMILAR_MAX = 24             # scenes in a scene page's "Similar scenes" reel
 SIMILAR_FETCH = 30           # candidates per StashDB query for it
 SIMILAR_PERFORMER = 3        # a shared performer weighs as much as this many shared tags
+SIMILAR_FAV_TAG = 3          # so does a shared tag that's one of the user's favourites
 SIMILAR_TTL = 3600
 WOMEN = {"FEMALE", "TRANSGENDER_FEMALE"}
 
@@ -1695,11 +1696,13 @@ class App:
         scene["stashdb_url"] = f"{STASHDB_WEB}/scenes/{scene_id}"
         return scene
 
-    def similar(self, scene_id):
+    def similar(self, scene_id, user=None):
         """Scenes like this one, for the reel under it: with the same women (everyone, in a
-        scene without any) or the same kind of action (its ACTION and SCENE tags; any tags
-        if it has none of those). Most in common first: a shared performer counts as much as
-        SIMILAR_PERFORMER shared tags; StashDB's popularity breaks ties."""
+        scene without any) or the same kind of action (its ACTION and SCENE tags, the user's
+        favourite tags first; any tags if it has none of those). Most in common first: a
+        shared performer, and a shared favourite tag, count as much as SIMILAR_PERFORMER and
+        SIMILAR_FAV_TAG other shared tags; a favourite tag this scene lacks counts as one.
+        StashDB's popularity breaks ties."""
         scene = self.stash.find_scene(scene_id)
         if not scene:
             raise ApiError(404, "StashDB has no scene with that ID.")
@@ -1708,6 +1711,8 @@ class App:
         tags = scene.get("tags") or []
         action = [t["id"] for t in tags if (t.get("category") or {}).get("group") in ("ACTION", "SCENE")]
         action = action or [t["id"] for t in tags]
+        favs = set(self.fav_tag_ids(user)) if user else set()
+        action.sort(key=lambda t: t not in favs)
         found = {}
 
         def add(criteria):
@@ -1735,7 +1740,9 @@ class App:
 
         def score(sc):
             shared = len({p["performer"]["id"] for p in sc.get("performers") or []} & women)
-            return SIMILAR_PERFORMER * shared + len(mine & set(their_tags.get(sc["id"], ())))
+            theirs = set(their_tags.get(sc["id"], ()))
+            return (SIMILAR_PERFORMER * shared + len(theirs & mine)
+                    + (SIMILAR_FAV_TAG - 1) * len(theirs & mine & favs) + len(theirs & favs - mine))
         order = {sid: n for n, sid in enumerate(found)}
         ranked = sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))
         return {"scenes": self.annotate(ranked[:SIMILAR_MAX])}
@@ -2364,7 +2371,7 @@ class Handler(BaseHTTPRequestHandler):
         if key == ("GET", "scene") and len(parts) == 2:
             return 200, app.scene(parts[1]), None
         if key == ("GET", "scene") and len(parts) == 3 and parts[2] == "similar":
-            return 200, app.similar(parts[1]), None
+            return 200, app.similar(parts[1], user), None
         if key == ("GET", "search"):
             return 200, app.search(q.get("q")), None
         if key == ("GET", "performers"):

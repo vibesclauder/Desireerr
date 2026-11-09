@@ -416,6 +416,17 @@ class Similar(unittest.TestCase):
         self.assertEqual(self.stash.queries[1]["tags"], {"value": [self.A, self.B], "modifier": "INCLUDES_ALL"})
         self.assertEqual(len(self.stash.queries), 2)
 
+    def test_favourite_tags_weigh_more(self):
+        self.cast((self.W1, "FEMALE"))
+        user = {"id": 1}
+        self.app.fav_tag_ids = lambda u: [self.B] if u else []
+        self.stash.listed = [self.card(self.X), self.card(self.Y), self.card(self.Z)]
+        self.stash.tags = {self.X: [self.A, self.C], self.Y: [self.B], self.Z: [self.B, self.A]}
+        got = [sc["id"] for sc in self.app.similar(SCENE, user)["scenes"]]
+        self.assertEqual(got, [self.Z, self.Y, self.X])  # 4, 3, 2
+        self.assertEqual([sc["id"] for sc in self.app.similar(SCENE)["scenes"]], [self.X, self.Z, self.Y])
+        self.assertEqual(self.stash.queries[1]["tags"]["value"], [self.B, self.A])  # favourite first
+
     def test_without_women_everyone_counts(self):
         self.cast((self.M1, "MALE"))
         self.stash.listed = [self.card(self.Z), self.card(self.Y, self.M1)]
