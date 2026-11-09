@@ -199,7 +199,35 @@ document.addEventListener("click", (e) => {
   if (a.pathname + a.search !== location.pathname + location.search) go(a.pathname + a.search);
   else window.scrollTo(0, 0);
 });
-window.addEventListener("popstate", () => render());
+window.addEventListener("popstate", () => { popped = true; render(); });
+
+// Back to a list: what "Load more" loaded and where it was scrolled come back as they were,
+// without asking StashDB again. Only for back and forward; a link opens a list afresh.
+history.scrollRestoration = "manual";
+const LIST_MEMORY_TTL = 15 * 60 * 1000;
+const LIST_MEMORY_MAX = 20;
+const listMemory = new Map();  // URL -> { items, page, total, shown, scroll, at }
+let popped = false, currentUrl = "";
+const pageUrl = () => location.pathname + location.search;
+function rememberList() {  // a list starts afresh at this URL
+  currentUrl = pageUrl();
+  const m = { items: [], page: 0, total: 0, shown: 0, scroll: 0, at: Date.now() };
+  listMemory.delete(currentUrl);
+  listMemory.set(currentUrl, m);
+  if (listMemory.size > LIST_MEMORY_MAX) listMemory.delete(listMemory.keys().next().value);
+  return m;
+}
+function recalledList(ctx) {
+  const m = ctx.back && listMemory.get(pageUrl());
+  return m && m.items.length && Date.now() - m.at < LIST_MEMORY_TTL ? m : null;
+}
+function restoreScroll(y) {
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+// A request changes a scene's state on remembered lists too.
+function rememberState(sceneId, state) {
+  for (const m of listMemory.values()) for (const x of m.items) if (x.id === sceneId) x.state = state;
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) {
@@ -299,6 +327,11 @@ async function render() {
   closeLightbox();
   const token = ++viewToken;
   const path = location.pathname;
+  const back = popped;
+  popped = false;
+  const left = listMemory.get(currentUrl);
+  if (left && currentUrl !== pageUrl()) left.scroll = window.scrollY;
+  currentUrl = pageUrl();
   if (!status.user && !["/login", "/setup"].includes(path)) {
     try { await refreshStatus(); } catch (e) { root.innerHTML = html`<div class="auth"><div class="auth-card"><div class="error-box">${e.message}</div></div></div>`.s; return; }
   }
@@ -318,7 +351,7 @@ async function render() {
   view.innerHTML = html`<div class="center"><div class="spinner"></div></div>`.s;
   window.scrollTo(0, 0);
   if (!match) { view.innerHTML = html`<div class="page"><div class="empty">There's no page here. <a href="/">Go to Discover</a></div></div>`.s; return; }
-  const ctx = { token, alive: () => token === viewToken };
+  const ctx = { token, back, alive: () => token === viewToken };
   try {
     await match[0](view, ...match[1].map(decodeURIComponent), ctx);
   } catch (e) {
@@ -380,20 +413,27 @@ function sceneCard(s) {
   const im = pickImage(s.images, true);
   const people = (s.performers || []).map(performerName).filter(Boolean).join(", ");
   const meta = [s.studio?.name, fmtDate(s.release_date)].filter(Boolean).join(" · ");
-  return html`<a class="card scene-card" href="/scene/${s.id}" data-scene="${s.id}">
+  // The picture opens the photo viewer (at the card's picture), the text the scene.
+  const photos = (s.images || []).map((i) => i.url);
+  return html`<div class="card scene-card" data-scene="${s.id}">
     <div class="thumb">
-      ${im ? html`<img src="${imgUrl(im, 600)}" alt="" loading="lazy" decoding="async">` : noImg()}
+      ${im ? html`<button type="button" class="zoom-card" data-photos="${JSON.stringify(photos)}" data-start="${photos.indexOf(im)}" data-title="${s.title || ""}" aria-label="Show the picture larger">
+        <img src="${imgUrl(im, 600)}" alt="" loading="lazy" decoding="async"><span class="magnifier">${icon("zoomIn")}</span></button>` : noImg()}
       ${s.duration ? html`<span class="dur">${fmtDur(s.duration)}</span>` : ""}
       <div class="quick">${sceneQuick(s)}</div>
       ${progressBar(s.state)}
     </div>
-    <div class="body">
+    <a class="body" href="/scene/${s.id}">
       <div class="title">${s.title || "Untitled"}</div>
       <div class="meta">${meta}</div>
       ${people ? html`<div class="people-line">${people}</div>` : ""}
-    </div>
-  </a>`;
+    </a>
+  </div>`;
 }
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".zoom-card");
+  if (b) lightbox(JSON.parse(b.dataset.photos).map((url) => ({ url })), +b.dataset.start, b.dataset.title);
+});
 
 function personCard(p) {
   const im = pickImage(p.images, false) || p.image;
@@ -517,6 +557,7 @@ document.addEventListener("click", async (e) => {
 
 function afterChange(sceneId, state, failed = false) {
   refreshStatus().catch(() => {});
+  if (sceneId && state) rememberState(sceneId, state);
   const p = location.pathname;
   if (p.startsWith("/scene/") || p === "/requests" || (failed && sceneId === null && p === "/")) return render();
   if (sceneId && state) {
@@ -750,12 +791,19 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
   };
 
   const grid = $("#b-grid", el), more = $("#b-more", el), countEl = $("#b-count", el);
-  let page = 0, total = 0, loading = false, seq = 0, shown = 0;
+  let page = 0, total = 0, loading = false, seq = 0, shown = 0, mem = null;
   const HAVE = new Set(["available", "processing", "downloading", "pending"]);
 
+  function draw(scenes) {
+    if (f.hide_have) scenes = scenes.filter((s) => !HAVE.has(s.state?.status));
+    grid.insertAdjacentHTML("beforeend", scenes.map((s) => sceneCard(s).s).join(""));
+    countEl.textContent = total ? `${total.toLocaleString()} scene${total === 1 ? "" : "s"}` : "";
+    if (!total) grid.innerHTML = html`<div class="empty" style="grid-column:1/-1">No scenes match these filters.</div>`.s;
+    more.innerHTML = shown < total ? html`<button class="btn" id="b-next">Load more</button>`.s : "";
+  }
   async function load(reset) {
     const my = ++seq;
-    if (reset) { page = 0; shown = 0; grid.innerHTML = ""; total = 0; }
+    if (reset) { page = 0; shown = 0; grid.innerHTML = ""; total = 0; mem = rememberList(); }
     loading = true;
     more.innerHTML = html`<div class="spinner"></div>`.s;
     try {
@@ -770,13 +818,10 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
       if (my !== seq || !ctx.alive()) return;
       page = res.page;
       total = res.count;
-      let scenes = res.scenes;
-      if (f.hide_have) scenes = scenes.filter((s) => !HAVE.has(s.state?.status));
-      grid.insertAdjacentHTML("beforeend", scenes.map((s) => sceneCard(s).s).join(""));
       shown += res.scenes.length;
-      countEl.textContent = total ? `${total.toLocaleString()} scene${total === 1 ? "" : "s"}` : "";
-      if (!total) grid.innerHTML = html`<div class="empty" style="grid-column:1/-1">No scenes match these filters.</div>`.s;
-      more.innerHTML = shown < total ? html`<button class="btn" id="b-next">Load more</button>`.s : "";
+      draw(res.scenes);
+      mem.items.push(...res.scenes);
+      Object.assign(mem, { page, total, shown, at: Date.now() });
     } catch (e) {
       if (my !== seq || !ctx.alive()) return;
       more.innerHTML = errorBox(e).s;
@@ -790,7 +835,12 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     if (entries[0].isIntersecting && !loading && shown && shown < total) load(false);
   }, { rootMargin: "600px" });
   io.observe(more);
-  await load(true);
+  const old = recalledList(ctx);
+  if (!old) return load(true);
+  mem = old;
+  ({ page, total, shown } = old);
+  draw(old.items);
+  restoreScroll(old.scroll);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1231,7 +1281,13 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
     <div class="section-head"><h2 id="l-count" style="font-size:15px;color:var(--muted);font-weight:500"></h2></div>
     <div class="grid ${gridClass}" id="l-grid"></div><div class="load-more" id="l-more"></div>`.s;
   const grid = $("#l-grid", el), more = $("#l-more", el), countEl = $("#l-count", el);
-  let page = 0, total = 0, shown = 0, loading = false, seq = 0;
+  let page = 0, total = 0, shown = 0, loading = false, seq = 0, mem = null;
+  const draw = (items) => {
+    grid.insertAdjacentHTML("beforeend", items.map((x) => card(x).s).join(""));
+    countEl.textContent = total ? `${total.toLocaleString()} found` : "";
+    if (!total) grid.innerHTML = html`<div class="empty" style="grid-column:1/-1">Nothing matches.</div>`.s;
+    more.innerHTML = shown < total ? html`<button class="btn" id="l-next">Load more</button>`.s : "";
+  };
   const sync = () => {
     const changed = Object.fromEntries(Object.entries(f).filter(([k, v]) => v !== defaults[k]));
     history.replaceState(null, "", location.pathname + qs(changed));
@@ -1240,7 +1296,7 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
   };
   async function load(reset) {
     const my = ++seq;
-    if (reset) { page = 0; shown = 0; total = 0; grid.innerHTML = ""; }
+    if (reset) { page = 0; shown = 0; total = 0; grid.innerHTML = ""; mem = rememberList(); }
     loading = true;
     more.innerHTML = html`<div class="spinner"></div>`.s;
     try {
@@ -1249,10 +1305,9 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
       page++;
       total = res.count;
       shown += res[key].length;
-      grid.insertAdjacentHTML("beforeend", res[key].map((x) => card(x).s).join(""));
-      countEl.textContent = total ? `${total.toLocaleString()} found` : "";
-      if (!total) grid.innerHTML = html`<div class="empty" style="grid-column:1/-1">Nothing matches.</div>`.s;
-      more.innerHTML = shown < total ? html`<button class="btn" id="l-next">Load more</button>`.s : "";
+      draw(res[key]);
+      mem.items.push(...res[key]);
+      Object.assign(mem, { page, total, shown, at: Date.now() });
     } catch (e) {
       if (my === seq && ctx.alive()) more.innerHTML = errorBox(e).s;
     } finally { loading = false; }
@@ -1268,7 +1323,12 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
     if (en[0].isIntersecting && !loading && shown && shown < total) load(false);
   }, { rootMargin: "600px" });
   io.observe(more);
-  return load(true);
+  const old = recalledList(ctx);
+  if (!old) return load(true);
+  mem = old;
+  ({ page, total, shown } = old);
+  draw(old.items);
+  restoreScroll(old.scroll);
 }
 
 const option = (v, label, cur) => html`<option value="${v}" ${v === cur ? "selected" : ""}>${label}</option>`;
@@ -1473,10 +1533,12 @@ async function viewSettings(view, ctx) {
       <h2>Jellyfin</h2>
       <p class="lede">With an API key, downloaded scenes get a Watch button that opens them in Jellyfin. On a torrent-box server, its setup makes the key.</p>
       ${s.jellyfin_error ? html`<div class="error-box">${s.jellyfin_error}</div>` : ""}
+      ${s.nfo_error ? html`<div class="error-box">Writing .nfo files: ${s.nfo_error}</div>` : ""}
       <form class="form-grid" id="jf-form">
         <label class="field"><span>Address (from this server)</span><input class="input" name="jellyfin_url" value="${s.jellyfin_url}" placeholder="http://localhost:8096"></label>
         <label class="field"><span>API key</span><input class="input" name="jellyfin_key" type="password" autocomplete="off" placeholder="${s.jellyfin_key_set ? "Saved. Paste a new one to replace it." : "Jellyfin: Dashboard, API Keys"}"></label>
         <label class="field" style="grid-column:1/-1"><span>Address for the Watch button (from your browser)</span><input class="input" name="jellyfin_link" value="${s.jellyfin_link}" placeholder="${location.protocol}//${location.hostname}:8096"></label>
+        <label class="check" style="grid-column:1/-1"><input type="checkbox" name="write_nfo" ${s.write_nfo ? "checked" : ""}> Write the downloaded scenes' .nfo files from StashDB: the performers as the cast, with their photos, and the studio, tags and description. Whisparr's own .nfo writing is turned off meanwhile (its pictures stay), and back on without this.</label>
         <div class="btns"><button class="btn primary">Save</button>${s.jellyfin_key_set && !s.jellyfin_error ? html`<span class="note ok-text">Connected: Jellyfin has ${s.jellyfin_videos} videos.</span>` : ""}</div>
       </form>
     </section>`);
@@ -1550,7 +1612,7 @@ async function viewSettings(view, ctx) {
     catch (err) { toast(err.message, true); } finally { b.classList.remove("busy"); }
   };
   submit("#jf-form", async (form) => {
-    const body = { jellyfin_url: form.jellyfin_url.value, jellyfin_link: form.jellyfin_link.value };
+    const body = { jellyfin_url: form.jellyfin_url.value, jellyfin_link: form.jellyfin_link.value, write_nfo: form.write_nfo.checked };
     if (form.jellyfin_key.value.trim()) body.jellyfin_key = form.jellyfin_key.value.trim();
     const res = await api("settings", { method: "PUT", body });
     toast(res.jellyfin_error ? `Saved, but: ${res.jellyfin_error}` : "Saved.", !!res.jellyfin_error);

@@ -151,6 +151,12 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .scene-card .people-line { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .scene-card .dur { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.65); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 6px; font-variant-numeric: tabular-nums; }
 .scene-card .quick { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; }
+.scene-card .zoom-card { display: block; width: 100%; height: 100%; border: 0; padding: 0; background: none; color: inherit; cursor: zoom-in; }
+.scene-card .magnifier { position: absolute; top: 50%; left: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; display: grid; place-items: center; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; opacity: 0; transform: scale(.85); transition: opacity .15s, transform .15s; pointer-events: none; }
+.scene-card .magnifier svg { width: 26px; height: 26px; }
+.scene-card .zoom-card:hover .magnifier, .scene-card .zoom-card:focus-visible .magnifier { opacity: 1; transform: none; }
+.scene-card a.body { color: inherit; text-decoration: none; }
+.scene-card a.body:hover .title { color: var(--accent-hi); }
 .scene-card .req-btn { opacity: 0; transition: opacity .15s; }
 .scene-card:hover .req-btn, .scene-card:focus-within .req-btn { opacity: 1; }
 @media (hover: none) { .scene-card .req-btn { opacity: 1; } }
