@@ -71,7 +71,9 @@ NFO_RETRY = 86400            # a scene StashDB didn't have is tried again after 
 NFO_MARK = "Desireerr"       # in the comment at the top of the .nfo files we write
 SIMILAR_MAX = 24             # scenes per reel under a scene (see App.similar)
 SIMILAR_FETCH = 30           # candidates per StashDB query for them
-SIMILAR_FAV_PERFORMER = 10   # a favourite performer weighs as much as ten matching tags
+SIMILAR_PERFORMER = 5        # one of this scene's performers, in another scene
+SIMILAR_FAV_PERFORMER = 10   # a favourite performer
+SIMILAR_FAV_HERE = 25        # a favourite performer who's in this scene too
 SIMILAR_FAVS = 200           # favourite performers asked about at most
 SIMILAR_CAST = 6             # Together again: pairs from this much of the cast (15 pairs)
 SIMILAR_TTL = 3600
@@ -1712,11 +1714,14 @@ class App:
         """The reels under a scene.
 
         With favourite performers: scenes with any of them (StashDB favourites and those
-        Whisparr follows), SIMILAR_FAV_PERFORMER for each, plus the tag score. Discover:
-        scenes with none of them (so never the same scene twice), by the tag score alone. Tag score, per tag of the other
-        scene: one this scene has too 1, one of the user's favourites 2, both 5. Both look
-        among StashDB's most popular scenes with this one's tags (its ACTION and SCENE tags,
-        favourites first; all of the first three, fewer if that finds too little).
+        Whisparr follows): SIMILAR_FAV_HERE for each who's in this scene too,
+        SIMILAR_FAV_PERFORMER for the others, plus the tag score. Discover: scenes with none
+        of them (so never the same scene twice): SIMILAR_PERFORMER for each of this scene's
+        performers, plus the tag score. Tag score, per tag of the other scene: one this
+        scene has too 1, one of the user's favourites 2, both 5. Both look among StashDB's
+        most popular scenes with this one's tags (its ACTION and SCENE tags, favourites
+        first; all of the first three, fewer if that finds too little), and among those of
+        the performers that count.
         Together again: other scenes with two or more of this cast, the most of them first,
         then the newest; they're left out of the other two. Popularity breaks ties.
         """
@@ -1777,12 +1782,23 @@ class App:
         def run(fn):
             Timing.begin(timing)
             return fn()
-        jobs = [lambda: gather({"performers": {"value": sorted(favs)[:SIMILAR_FAVS], "modifier": "INCLUDES"}},
-                               lambda sc: people(sc) & favs) if favs else {},
-                lambda: gather({}, lambda sc: not people(sc) & favs),
+        def with_(ids):
+            return {"performers": {"value": sorted(ids)[:SIMILAR_FAVS], "modifier": "INCLUDES"}}
+
+        def fav(sc):
+            return people(sc) & favs
+
+        def no_fav(sc):
+            return not people(sc) & favs
+        favs_here, others_here = set(cast) & favs, set(cast) - favs
+        jobs = [lambda: gather(with_(favs_here), fav) if favs_here else {},
+                lambda: gather(with_(favs), fav) if favs else {},
+                lambda: gather(with_(others_here), no_fav) if others_here else {},
+                lambda: gather({}, no_fav),
                 together]
         with ThreadPoolExecutor(len(jobs)) as pool:
-            inner, outer, again = pool.map(run, jobs)
+            inner_here, inner, outer_here, outer, again = pool.map(run, jobs)
+        inner, outer = {**inner_here, **inner}, {**outer_here, **outer}
         again = again[:SIMILAR_MAX]
         for sid in {sc["id"] for sc in again}:
             inner.pop(sid, None)
@@ -1800,9 +1816,14 @@ class App:
             order = {sid: n for n, sid in enumerate(found)}
             return sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))[:SIMILAR_MAX]
 
-        rows = [("inner", "Similar scenes with favourite performers", "",
-                 ranked(inner, lambda sc: SIMILAR_FAV_PERFORMER * len(people(sc) & favs) + tag_score(sc))),
-                ("discover", "Discover similar scenes", "", ranked(outer, tag_score)),
+        def inner_score(sc):
+            return (SIMILAR_FAV_HERE * len(people(sc) & favs_here)
+                    + SIMILAR_FAV_PERFORMER * len(people(sc) & favs - favs_here) + tag_score(sc))
+
+        def outer_score(sc):
+            return SIMILAR_PERFORMER * len(people(sc) & others_here) + tag_score(sc)
+        rows = [("inner", "Similar scenes with favourite performers", "", ranked(inner, inner_score)),
+                ("discover", "Discover similar scenes", "", ranked(outer, outer_score)),
                 ("together", "Together again", "Two or more of this cast in another scene", again)]
         return {"rows": [{"key": key, "title": title, "sub": sub, "scenes": self.annotate(scenes)}
                          for key, title, sub, scenes in rows if scenes]}

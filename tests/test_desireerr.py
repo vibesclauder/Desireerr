@@ -381,7 +381,7 @@ class Favourites(unittest.TestCase):
 
 
 class Similar(unittest.TestCase):
-    """The reels under a scene: Inner circle, Discover, Together again."""
+    """The reels under a scene: with favourite performers, Discover, Together again."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -394,16 +394,16 @@ class Similar(unittest.TestCase):
                       {"id": "C", "category": {"group": "PEOPLE"}}]
         stash.scenes[SCENE] = sc
         stash.tags = {}
-        self.inner, self.outer, self.pairs, self.queries = [], [], {}, []
-        self.favs = ["w1"]                                       # StashDB favourites
-        self.app.whisparr.followed = {"performers": [{"id": "f2"}], "studios": []}  # followed
+        self.listed, self.pairs, self.queries = [], {}, []  # StashDB's answer to every search
+        self.favs = ["w1"]                                                  # StashDB favourites
+        self.app.whisparr.followed = {"performers": [{"id": "f2"}, {"id": "f3"}], "studios": []}
         self.app.fav_tag_ids = lambda user: ["A", "D"] if user else []
 
         def query_scenes(inp, ttl=300):
             self.queries.append(inp)
             if inp.get("fail"):
                 raise d.ApiError(502, "StashDB is down")
-            return {"count": 0, "scenes": self.inner if "performers" in inp else self.outer}
+            return {"count": 0, "scenes": self.listed}
         stash.query_scenes = query_scenes
         stash.query_performers = lambda inp: {"count": len(self.favs),
                                               "performers": [{"id": i} for i in self.favs]}
@@ -420,28 +420,37 @@ class Similar(unittest.TestCase):
     def rows(self, user={"id": 1}):
         return {r["key"]: [sc["id"] for sc in r["scenes"]] for r in self.app.similar(SCENE, user)["rows"]}
 
-    def test_inner_circle_favourite_performers_first(self):
-        self.inner = [self.card("x1", "w1"), self.card("x2", "w1", "f2"), self.card("x3", "f2"),
-                      self.card(SCENE, "w1"), self.card("x4", "w2")]  # x4: no favourite after all
-        self.app.stash.tags = {"x1": ["A"], "x3": ["B", "C", "D"]}
-        # x2: two favourites 20; x1: one, and A (matching favourite tag) 15; x3: 10 + 1 + 1 + 2
-        self.assertEqual(self.rows()["inner"], ["x2", "x1", "x3"])
-        inner = [q for q in self.queries if "performers" in q]
-        self.assertEqual(inner[0]["performers"], {"value": ["f2", "w1"], "modifier": "INCLUDES"})
-        self.assertEqual(inner[0]["tags"], {"value": ["A", "B"], "modifier": "INCLUDES_ALL"})  # C: looks
-        self.assertEqual(inner[-1].get("tags"), None)  # too few with the tags: any of theirs
+    def asked(self, people=None, tags=None):
+        return any((q.get("performers") or {}).get("value") == people and (q.get("tags") or {}).get("value") == tags
+                   for q in self.queries)
 
-    def test_discover_leaves_favourites_out_and_goes_by_tags(self):
-        self.outer = [self.card("y1", "w1"), self.card("y2", "w2"), self.card("y3"), self.card("y4"),
-                      self.card("y5", "f2")]
+    def test_with_favourite_performers(self):
+        self.listed = [self.card("x1", "w1"), self.card("x2", "w1", "f2"), self.card("x3", "f2"),
+                       self.card(SCENE, "w1"), self.card("x4", "w2"), self.card("x5", "f2", "f3")]
+        self.app.stash.tags = {"x1": ["A"], "x3": ["B", "C", "D"]}
+        # x2: w1 here 25 + f2 10; x1: 25 + A (a favourite tag this scene has) 5; x5: 10 + 10;
+        # x3: 10 + 1 + 1 + 2. x4 has no favourite: it's Discover's.
+        rows = self.rows()
+        self.assertEqual(rows["inner"], ["x2", "x1", "x5", "x3"])
+        self.assertEqual(rows["discover"], ["x4"])
+        self.assertTrue(self.asked(["f2", "f3", "w1"], ["A", "B"]))  # C is about looks
+        self.assertTrue(self.asked(["w1"], ["A", "B"]))              # the favourite who's here
+        self.assertTrue(self.asked(["f2", "f3", "w1"]))              # too few: any of theirs
+
+    def test_discover_leaves_favourites_out(self):
+        self.listed = [self.card("y1", "w1"), self.card("y2", "w2"), self.card("y3"), self.card("y4"),
+                       self.card("y5", "f2"), self.card("y6", "m1", "w2")]
         self.app.stash.tags = {"y1": ["A"], "y2": ["B"], "y3": ["A"], "y4": ["D"]}
-        self.assertEqual(self.rows()["discover"], ["y3", "y4", "y2"])  # 5, 2, 1
-        self.assertEqual(self.queries[-1]["tags"]["value"], ["A"])  # fewer tags, favourite first
+        # y6: two of the cast 10 (Together again would take it, if StashDB said so); y2: w2 5 +
+        # B 1; y3: A 5; y4: D 2
+        self.assertEqual(self.rows()["discover"], ["y6", "y2", "y3", "y4"])
+        self.assertTrue(self.asked(["m1", "w2"], ["A", "B"]))
+        self.assertTrue(self.asked(None, ["A"]))  # fewer tags, the favourite first
 
     def test_favourite_tags_count_only_for_the_user(self):
-        self.outer = [self.card("y2", "w2"), self.card("y3"), self.card("y4")]
+        self.listed = [self.card("y2", "w2"), self.card("y3"), self.card("y4")]
         self.app.stash.tags = {"y2": ["B", "C"], "y3": ["A"], "y4": ["D"]}
-        self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4"])  # 2, 1, 0
+        self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4"])  # 7, 1, 0
 
     def test_together_again_most_of_the_cast_then_newest(self):
         self.pairs = {("w1", "w2"): [self.card("t1", "w1", "w2", date="2020-01-01"),
@@ -449,22 +458,23 @@ class Similar(unittest.TestCase):
                       ("w1", "m1"): [self.card("t2", "w1", "w2", "m1", date="2018-01-01"),
                                      self.card("t3", "w1", "m1", date="2022-01-01")],
                       ("w2", "m1"): [self.card("t2", "w1", "w2", "m1", date="2018-01-01")]}
-        self.inner = [self.card("t1", "w1", "w2"), self.card("x1", "w1")]
+        self.listed = [self.card("t1", "w1", "w2"), self.card("x1", "w1")]
         rows = self.rows()
         self.assertEqual(rows["together"], ["t2", "t3", "t1"])
-        self.assertEqual(rows["inner"], ["x1"])  # t1 is in Together again
-        self.assertEqual(list(rows), ["inner", "together"])  # empty rows left out
+        self.assertEqual(rows, {"inner": ["x1"], "together": ["t2", "t3", "t1"]})  # t1 only once
 
     def test_without_favourites_or_tags(self):
         self.favs, self.app.whisparr.followed = [], {"performers": [], "studios": []}
-        self.outer = [self.card("y2", "w2")]
-        self.assertEqual(self.rows(), {"discover": ["y2"]})
-        self.assertTrue(all("performers" not in q for q in self.queries))
+        self.listed = [self.card("y2", "w2"), self.card("y7", "f9")]
+        self.app.stash.tags = {"y7": ["A"]}
+        self.assertEqual(self.rows(), {"discover": ["y2", "y7"]})  # w2 5, A 5: StashDB's order
         self.app.stash.scenes[SCENE]["tags"] = []
+        self.assertEqual(self.rows(), {"discover": ["y2", "y7"]})  # found through the cast
+        self.app.stash.scenes[SCENE]["performers"] = []
         self.assertEqual(self.rows(), {})
 
     def test_stashdb_trouble_leaves_the_rest(self):
-        self.inner = [self.card("x1", "w1")]
+        self.listed = [self.card("x1", "w1")]
         queries = self.app.stash.query_scenes
 
         def flaky(inp, ttl=300):

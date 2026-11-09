@@ -20,12 +20,14 @@ or available.
 - **Scene pages.** The cast with their ages then and now (and a † for those who died), and
   reels at the bottom:
   - *Similar scenes with favourite performers*: scenes with your StashDB favourites or the
-    performers Whisparr follows. Each of them in a scene counts 10.
-  - *Discover similar scenes*: scenes with none of them, so the two reels never overlap.
+    performers Whisparr follows. Each of them counts 10, or 25 if they're in this scene too.
+  - *Discover similar scenes*: scenes with none of them, so the two reels never overlap. Each
+    of this scene's performers in them counts 5.
   - *Together again*: other scenes with two or more of this cast, the most of them first.
 
-  The first two look among StashDB's most popular scenes with this one's action tags, and
-  rank them by tags: a tag this scene has too counts 1, one of your favourite tags 2, both 5.
+  The first two look among StashDB's most popular scenes with this one's action tags and with
+  those performers, and add the tags: a tag this scene has too counts 1, one of your favourite
+  tags 2, both 5.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.
