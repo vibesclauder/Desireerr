@@ -644,7 +644,7 @@ document.addEventListener("click", async (e) => {
     } else if (act === "follow") {
       const follow = b.dataset.follow === "1";
       await api("follow", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, follow } });
-      toast(follow ? "Following. Whisparr will grab new scenes from today on." : "Not following any more.");
+      toast(follow ? "Following. Its new scenes, from today on, are requested for you every hour; it's under Saved searches." : "Not following any more. Its requests so far stay.");
       render();
     }
   } catch (err) {
@@ -1248,10 +1248,9 @@ function favoriteButton(kind, item) {
 function followButton(kind, item) {
   const f = item.follow || {};
   if (f.error) return html`<span class="note bad-text">${f.error}</span>`;
-  if (!me.is_admin) return f.followed ? html`<span class="pill processing">${icon("bell")}Followed</span>` : "";
   return f.followed
-    ? html`<button class="btn" data-act="follow" data-kind="${kind}" data-id="${item.id}" data-follow="0" title="Whisparr grabs new scenes${f.since ? ` released after ${f.since}` : ""}">${icon("bellOff")}Unfollow</button>`
-    : html`<button class="btn primary" data-act="follow" data-kind="${kind}" data-id="${item.id}" data-follow="1" title="Whisparr grabs scenes released from today on. Older ones can still be requested one by one.">${icon("bell")}Follow new scenes</button>`;
+    ? html`<button class="btn" data-act="follow" data-kind="${kind}" data-id="${item.id}" data-follow="0" title="Its new scenes${f.since ? ` (released from ${f.since})` : ""} are requested for you every hour. Unfollowing keeps the requests made so far.">${icon("bellOff")}Unfollow</button>`
+    : html`<button class="btn primary" data-act="follow" data-kind="${kind}" data-id="${item.id}" data-follow="1" title="Scenes released from today on are requested for you every hour, like a saved search (it's listed there). Older ones can still be requested one by one.">${icon("bell")}Follow new scenes</button>`;
 }
 
 async function viewPerformer(view, id, ctx) {
@@ -1699,7 +1698,7 @@ async function viewSettings(view, ctx) {
     </section>`);
     parts.push(html`<section class="panel" style="max-width:none">
       <h2>Users</h2>
-      <p class="lede">Admins approve requests, follow performers and studios, and change settings. Auto-approved users' requests go straight to Whisparr; everyone else's wait for an admin.</p>
+      <p class="lede">Admins approve requests and change settings. Auto-approved users' requests go straight to Whisparr; everyone else's wait for an admin.</p>
       <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Auto-approve</th><th class="num">Requests</th><th>Added</th><th></th></tr></thead><tbody>
         ${users.map((u) => html`<tr data-user="${u.id}">
           <td><b>${u.username}</b>${u.id === me.id ? html` <span class="note">(you)</span>` : ""}</td>

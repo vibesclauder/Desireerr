@@ -13,17 +13,17 @@ or available.
   a plain JavaScript single-page app with no build step.
 - **Everything is behind the login.** Covers are fetched through the server and cached, so
   the browser only talks to Desireerr. Covers can be blurred, and the tab title is a setting.
-- **Users and approvals.** Admins approve requests, follow performers and studios, set
-  favourites and change settings. Other users' requests wait for approval unless they're auto-approved.
+- **Users and approvals.** Admins approve requests, set favourites and change settings. Other users' requests wait for approval unless they're auto-approved.
 - **Saved searches.** Any filter on the Scenes page (tags in and out, performers, studios,
-  favourites) can request its new scenes every hour, which Whisparr's follows can't.
+  favourites) can request its new scenes every hour. Following a performer or studio is one
+  too, so every request is made, and shown, in Desireerr.
 - **Discover.** Trending, new and popular scenes, new ones with your favourite performers and
   with the tags you love or like, and what was added lately. StashDB's rows are kept for an
   hour (sooner if your feelings, favourites or follows change); Reload asks again now.
 - **Scene pages.** The cast with their ages then and now (and a † for those who died), and
   reels at the bottom:
   - *Similar scenes with favourite performers*: scenes with your StashDB favourites or the
-    performers Whisparr follows. Each of them counts 10, or 25 if they're in this scene too.
+    performers you follow. Each of them counts 10, or 25 if they're in this scene too.
   - *Discover similar scenes*: scenes with none of them, so the two reels never overlap. Each
     of this scene's performers in them counts 5.
   - *Together again*: other scenes with two or more of this cast, the most of them first.
@@ -96,14 +96,14 @@ On a phone, open it and "Add to home screen" for an app icon.
 
 ## How requests reach Whisparr
 
-- **Request a scene:** if Whisparr already has it (unmonitored, say from a followed
-  performer's back catalogue), it's monitored; otherwise it's added by its StashDB ID with the
+- **Request a scene:** if Whisparr already has it (unmonitored, say from a performer's back
+  catalogue), it's monitored; otherwise it's added by its StashDB ID with the
   quality profile and folder from Settings. Then Whisparr searches for it right away, unless
   that's switched off in Settings (then only the RSS feed can grab it).
 - **Favourite a performer or studio** (admins, the heart): saved on your StashDB account, and
   nothing else. Favourites are a filter: the Scenes page's Favourites filter, "favourites
   only" on Performers and Studios, and saved searches. Favourite performers, with those
-  Whisparr follows, make Discover's "New scenes with favourite performers" (none with a tag
+  you follow, make Discover's "New scenes with favourite performers" (none with a tag
   you hate or dislike) and the reel of them under a scene. Nothing is downloaded for them. (Whisparr's own StashDB import list, if you
   switch it on, does add favourites to Whisparr, with their whole back catalogue.)
 - **Tag feelings** (anyone): love, like, neutral (the default), dislike or hate. Click any tag
@@ -117,9 +117,12 @@ On a phone, open it and "Add to home screen" for an app icon.
   StashDB takes one tags condition per search: with tags picked as well, the favourites go
   to StashDB and the picked tags are checked by Desireerr, so pages can come back short
   (with a single favourite tag and "All tags", it's one exact search).
-- **Follow a performer or studio** (admins): monitored in Whisparr with the "after" date set to
-  today, so only new scenes are wanted. Without a date Whisparr would want the whole back
-  catalogue. Older scenes can still be requested one by one.
+- **Follow a performer or studio** (anyone): a saved search for its scenes released from today
+  on (it's listed under Saved searches as "Following …"), so each new scene becomes a request
+  of yours, approved or waiting like any other. Whisparr itself follows nothing: whatever it
+  followed before is taken over this way (by the first admin, from the same date) and
+  switched off there. Older scenes can still be requested one by one; unfollowing keeps the
+  requests made so far.
 - **Status** comes from Whisparr's library and queue, refreshed every two minutes:
   *available* (has a file), *downloading* (in the queue, with progress), *requested*
   (monitored, waiting for a release), *pending* (waiting for an admin).

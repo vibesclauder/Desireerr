@@ -271,6 +271,7 @@ COLUMNS = [
     ("requests", "watch_id", "INTEGER"),
     ("requests", "notified", "TEXT NOT NULL DEFAULT ''"),   # pushes sent once: available, stalled
     ("requests", "searched_at", "INTEGER"),                 # last "search again"
+    ("watches", "follow", "TEXT NOT NULL DEFAULT ''"),      # "performer:<id>": a follow
 ]
 
 
@@ -572,7 +573,6 @@ class Whisparr:
         self.index_time = 0
         self.queue = {}            # whisparr id -> {"progress", "status", "timeleft"}
         self.queue_time = 0
-        self.followed = {"performers": [], "studios": []}
         self.error = ""
 
     def creds(self):
@@ -647,21 +647,14 @@ class Whisparr:
         with self.lock:
             self.queue, self.queue_time = queue, time.time()
 
-    def refresh_followed(self):
-        """The performers and studios Whisparr monitors, for Discover's rows."""
-        def image(item):
-            urls = [i.get("remoteUrl") for i in item.get("images") or [] if i.get("remoteUrl")]
-            return urls[0] if urls else ""
+    def followed_here(self):
+        """The performers and studios Whisparr itself follows (monitors for new scenes):
+        [(kind, item)]. Desireerr's follows are saved searches; see App.adopt_whisparr_follows."""
+        return [(kind, item) for kind in ("performer", "studio")
+                for item in self.call("GET", kind, timeout=60) or [] if item.get("monitored")]
 
-        followed = {}
-        for kind, name_key in (("performer", "name"), ("studio", "title")):
-            items = self.call("GET", kind, timeout=60) or []
-            followed[kind + "s"] = sorted(
-                ({"id": i["foreignId"], "name": i.get(name_key) or "", "image": image(i),
-                  "since": i.get("afterDate")} for i in items if i.get("monitored") and i.get("foreignId")),
-                key=lambda x: x["name"].lower())
-        with self.lock:
-            self.followed = followed
+    def stop_following(self, kind, item):
+        self.call("PUT", f"{kind}/{item['id']}", dict(item, monitored=False))
 
     def ensure_fresh(self):
         try:
@@ -753,46 +746,6 @@ class Whisparr:
             for entry in self.index.values():
                 if entry.get("id") == movie_id:
                     entry["monitored"] = False
-
-    def follow_state(self, kind, stash_id):
-        items = self.call("GET", kind, params={"stashId": stash_id}) or []
-        items = [i for i in items if i.get("foreignId") == stash_id]
-        if not items:
-            return {"followed": False, "since": None}
-        item = items[0]
-        return {"followed": bool(item.get("monitored")), "since": item.get("afterDate")}
-
-    def set_follow(self, kind, stash_id, follow):
-        """Follow (monitor) a performer or studio for new scenes only: after date today.
-
-        With no after date Whisparr would add and want the whole back catalogue, and the
-        after date also puts the older scenes on its exclusion list, so it is always set
-        when following. Single scenes from the back catalogue can still be requested.
-        """
-        items = self.call("GET", kind, params={"stashId": stash_id}) or []
-        items = [i for i in items if i.get("foreignId") == stash_id]
-        if items:
-            item = items[0]
-            if follow and not item.get("afterDate"):
-                item["afterDate"] = today()
-            item["monitored"] = bool(follow)
-            self.call("PUT", f"{kind}/{item['id']}", item)
-        elif follow:
-            found = self.call("GET", f"lookup/{kind}", params={"term": f"stash:{stash_id}"}) or []
-            match = next((f for f in found if f.get("foreignId") == stash_id), None)
-            if not match:
-                raise ApiError(502, f"Whisparr couldn't find this {kind} in its metadata.")
-            profile, root = self.defaults()
-            item = dict(match[kind])
-            item.pop("id", None)
-            item.update({"monitored": True, "qualityProfileId": profile, "rootFolderPath": root,
-                         "searchOnAdd": False, "afterDate": today()})
-            self.call("POST", kind, item)
-        try:
-            self.refresh_followed()
-        except ApiError:
-            pass
-        return self.follow_state(kind, stash_id)
 
     def set_metadata(self, on):
         """Whisparr's Kodi (XBMC) / Emby metadata (its .nfo and screenshot.jpg) off, or back
@@ -1760,7 +1713,7 @@ class App:
                            (user["id"],))
         for r in mine:
             self.decorate(r)
-        return {"rows": out, "requests": mine, "followed": self.whisparr.followed,
+        return {"rows": out, "requests": mine, "followed": self.followed(user),
                 "whisparr_error": self.whisparr.error, "updated": made}
 
     def forget_discover(self, user=None):
@@ -1775,7 +1728,7 @@ class App:
         """Discover's row: the newest scenes with the favourite performers (StashDB favourites
         and those Whisparr follows, as under a scene), none with a tag the user hates or
         dislikes."""
-        favs = self.favourite_performers()
+        favs = self.favourite_performers(user)
         if not favs:
             return []
         scenes = self.stash.query_scenes(
@@ -1862,7 +1815,7 @@ class App:
         action = [t for t in action or [t["id"] for t in tags] if feel.get(t, 0) >= 0]
         action.sort(key=lambda t: -feel.get(t, 0))
         cast = list(dict.fromkeys(p["performer"]["id"] for p in scene.get("performers") or []))
-        favs = self.favourite_performers()
+        favs = self.favourite_performers(user)
 
         def people(sc):
             return {p["performer"]["id"] for p in sc.get("performers") or []}
@@ -1960,9 +1913,9 @@ class App:
         return {"rows": [{"key": key, "title": title, "sub": sub, "scenes": self.annotate(scenes)}
                          for key, title, sub, scenes in rows if scenes]}
 
-    def favourite_performers(self):
-        """StashDB's favourite performers and the ones Whisparr follows: the inner circle."""
-        ids = {p["id"] for p in self.whisparr.followed.get("performers", [])}
+    def favourite_performers(self, user=None):
+        """StashDB's favourite performers and the ones the user follows: the inner circle."""
+        ids = {f["id"] for f in self.follows(user, "performer")} if user else set()
         try:
             for page in range(1, 4):
                 res = self.stash.query_performers({"page": page, "per_page": 100, "sort": "NAME",
@@ -1974,27 +1927,88 @@ class App:
             print(f"favourite performers: {e.message}", file=sys.stderr, flush=True)
         return ids
 
-    def performer(self, pid):
+    def performer(self, pid, user):
         perf = self.stash.find_performer(pid)
         if not perf:
             raise ApiError(404, "StashDB has no performer with that ID.")
         perf["stashdb_url"] = f"{STASHDB_WEB}/performers/{pid}"
-        try:
-            perf["follow"] = self.whisparr.follow_state("performer", pid)
-        except ApiError as e:
-            perf["follow"] = {"followed": False, "error": e.message}
+        perf["follow"] = self.follow_state(user, "performer", pid)
         return perf
 
-    def studio(self, sid):
+    def studio(self, sid, user):
         studio = self.stash.find_studio(sid)
         if not studio:
             raise ApiError(404, "StashDB has no studio with that ID.")
         studio["stashdb_url"] = f"{STASHDB_WEB}/studios/{sid}"
-        try:
-            studio["follow"] = self.whisparr.follow_state("studio", sid)
-        except ApiError as e:
-            studio["follow"] = {"followed": False, "error": e.message}
+        studio["follow"] = self.follow_state(user, "studio", sid)
         return studio
+
+    # -- following: a saved search for a performer's or studio's new scenes ------------------
+    # So its new scenes are requested in Desireerr like any other, as the follower; Whisparr
+    # itself follows nothing.
+
+    def follows(self, user, kind=None):
+        """The user's follows: [{"kind", "id", "name", "since", "watch_id"}]."""
+        rows = self.db.all("SELECT id, name, since, follow FROM watches WHERE user_id = ? AND follow != ''",
+                           (user["id"],))
+        out = [{"kind": r["follow"].split(":")[0], "id": r["follow"].split(":", 1)[1],
+                "name": r["name"].removeprefix("Following "), "since": r["since"], "watch_id": r["id"]}
+               for r in rows]
+        return [f for f in out if kind in (None, f["kind"])]
+
+    def follow_state(self, user, kind, sid):
+        w = self.db.one("SELECT since FROM watches WHERE user_id = ? AND follow = ?", (user["id"], f"{kind}:{sid}"))
+        return {"followed": bool(w), "since": w["since"] if w else None}
+
+    def set_follow(self, user, kind, sid, follow, name=None, since=None):
+        """Follow: a saved search for the performer's (studio's) scenes released from today
+        (SINCE) on. Unfollow: that saved search goes; the requests it made stay."""
+        key = f"{kind}:{sid}"
+        if not follow:
+            self.db.run("DELETE FROM watches WHERE user_id = ? AND follow = ?", (user["id"], key))
+        elif not self.follow_state(user, kind, sid)["followed"]:
+            name = name or self.stash.names(kind + "s", [sid]).get(sid)
+            if not name:
+                raise ApiError(404, f"StashDB has no {kind} with that ID.")
+            w = self.save_watch(user, {"name": f"Following {name}"[:80], "query": f"{kind}s={sid}",
+                                       "summary": f"New scenes {'with' if kind == 'performer' else 'from'} {name}",
+                                       "since": since or today()})
+            self.db.run("UPDATE watches SET follow = ? WHERE id = ?", (key, w["id"]))
+        self.forget_discover(user)
+        return self.follow_state(user, kind, sid)
+
+    def followed(self, user):
+        """Discover's "you follow" rows: the user's follows as StashDB's cards, with since."""
+        out = {}
+        for kind, field, card, fragment in (("performer", "findPerformer", "PerformerCard", PERFORMER_CARD),
+                                            ("studio", "findStudio", "StudioCard", STUDIO_CARD)):
+            mine = {f["id"]: f for f in self.follows(user, kind)}
+            try:
+                cards = self.stash.find_many(field, list(mine), f"{{ ...{card} }}", fragment, ttl=3600) if mine else []
+            except ApiError:
+                cards = [{"id": i, "name": f["name"]} for i, f in mine.items()]
+            out[kind + "s"] = sorted((dict(c, name=c.get("name") or mine[c["id"]]["name"], since=mine[c["id"]]["since"])
+                                      for c in cards if c["id"] in mine), key=lambda c: c["name"].lower())
+        return out
+
+    def adopt_whisparr_follows(self):
+        """What Whisparr follows itself (from before follows were Desireerr's, or set up in
+        Whisparr): followed in Desireerr instead, by the first admin, from the same date, and
+        no longer in Whisparr, so its new scenes come as requests."""
+        admin = self.db.one("SELECT * FROM users WHERE is_admin = 1 ORDER BY id LIMIT 1")
+        if not admin:
+            return []
+        done = []
+        for kind, item in self.whisparr.followed_here():
+            sid, name = item.get("foreignId"), item.get("name") or item.get("title") or ""
+            if not sid:
+                continue
+            since = (item.get("afterDate") or "")[:10]
+            self.set_follow(admin, kind, sid, True, name=name or None,
+                            since=since if re.fullmatch(r"\d{4}-\d{2}-\d{2}", since) else None)
+            self.whisparr.stop_following(kind, item)
+            done.append(f"{kind} {name}")
+        return done
 
     def browse_performers(self, q):
         inp = {
@@ -2111,6 +2125,8 @@ class App:
         elif values:
             if {"query", "since"} & values.keys():
                 values["cursor"] = ""     # look through the matches again
+            if "query" in values:
+                values["follow"] = ""     # other filters: a plain saved search now
             sets = ", ".join(f"{k} = ?" for k in values)
             self.db.run(f"UPDATE watches SET {sets} WHERE id = ?", list(values.values()) + [wid])
         return self.watch(user, wid)
@@ -2607,11 +2623,11 @@ class Handler(BaseHTTPRequestHandler):
         if key == ("GET", "performers"):
             return 200, app.browse_performers(q), None
         if key == ("GET", "performer") and len(parts) == 2:
-            return 200, app.performer(parts[1]), None
+            return 200, app.performer(parts[1], user), None
         if key == ("GET", "studios"):
             return 200, app.browse_studios(q), None
         if key == ("GET", "studio") and len(parts) == 2:
-            return 200, app.studio(parts[1]), None
+            return 200, app.studio(parts[1], user), None
         if key == ("GET", "tags"):
             return 200, app.tags(q), None
         if key == ("GET", "names"):
@@ -2637,15 +2653,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "Favourite takes a performer or studio ID.")
             return 200, app.set_favorite(kind, body["id"], bool(body.get("favorite"))), None
 
-        # -- following (admins: it changes what Whisparr wants from now on) --
+        # -- following (anyone: a saved search for the new scenes, requested as them) --
         if key == ("POST", "follow"):
-            admin()
             body = self.body_json()
             kind = body.get("kind")
             if kind not in ("performer", "studio") or not id_list(body.get("id")):
                 raise ApiError(400, "Follow takes a performer or studio ID.")
-            out = app.whisparr.set_follow(kind, body["id"], bool(body.get("follow")))
-            app.forget_discover()
+            out = app.set_follow(user, kind, body["id"], bool(body.get("follow")))
+            app.forget_discover()  # favourite performers are everyone's StashDB ones plus follows
             return 200, out, None
 
         # -- requests --
@@ -2795,7 +2810,7 @@ def refresher(app):
         try:
             app.whisparr.refresh_index()
             app.whisparr.refresh_queue()
-            app.whisparr.refresh_followed()
+            app.adopt_whisparr_follows()
             app.check_requests()
         except ApiError as e:
             app.whisparr.error = e.message

@@ -46,6 +46,9 @@ class FakeStash:
     def find_scenes(self, ids):
         return [self.scenes[i] for i in ids if i in self.scenes]
 
+    def names(self, kind, ids):
+        return {i: f"Name {i[:4]}" for i in ids}
+
     def query_scenes(self, inp, ttl=300):
         self.queries.append(dict(inp))
         start = (inp["page"] - 1) * inp["per_page"]
@@ -259,33 +262,70 @@ class Requests(unittest.TestCase):
 
 
 class Follow(unittest.TestCase):
+    """Following: a saved search for the new scenes, requested in Desireerr; Whisparr follows
+    nothing."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.sent = []
+        self.put = []
         self.app = make_app(self.tmp.name, {
-            ("GET", "performer"): lambda b, p: [],
-            ("GET", "lookup/performer"): [{"foreignId": SCENE, "performer": {"foreignId": SCENE, "name": "P", "id": 0}}],
-            ("POST", "performer"): lambda b, p: self.sent.append(b) or b,
-            ("GET", "qualityprofile"): [{"id": 1, "name": "Any"}],
-            ("GET", "rootfolder"): [{"path": "/x/HD"}],
+            ("GET", "performer"): [{"id": 3, "foreignId": OTHER, "name": "Old Follow", "monitored": True,
+                                    "afterDate": "2026-10-30T00:00:00Z"},
+                                   {"id": 4, "foreignId": SCENE, "name": "Catalogue", "monitored": False}],
             ("GET", "studio"): [],
+            ("PUT", "performer/3"): lambda b, p: self.put.append(b) or b,
         })
+        self.app.stash.query_performers = lambda inp: {"count": 0, "performers": []}  # no StashDB favourites
+        self.admin = self.user("boss", True)
+        self.guest = self.user("guest", False)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_follow_sets_after_date_to_today(self):
-        self.app.whisparr.set_follow("performer", SCENE, True)
-        self.assertEqual(self.sent[0]["afterDate"], d.today())
-        self.assertTrue(self.sent[0]["monitored"])
-        self.assertFalse(self.sent[0]["searchOnAdd"])
+    def user(self, name, admin):
+        self.app.create_user(name, "password1", is_admin=admin)
+        return self.app.db.one("SELECT * FROM users WHERE username = ?", (name,))
 
-    def test_refollow_keeps_existing_date(self):
-        put = []
-        self.app.whisparr.routes[("GET", "performer")] = [{"id": 3, "foreignId": SCENE, "monitored": False, "afterDate": "2026-10-30"}]
-        self.app.whisparr.routes[("PUT", "performer/3")] = lambda b, p: put.append(b) or b
-        self.app.whisparr.set_follow("performer", SCENE, True)
-        self.assertEqual((put[0]["afterDate"], put[0]["monitored"]), ("2026-10-30", True))
+    def test_a_follow_is_a_saved_search_for_new_scenes(self):
+        app = self.app
+        self.assertEqual(app.set_follow(self.guest, "performer", SCENE, True), {"followed": True, "since": d.today()})
+        app.set_follow(self.guest, "performer", SCENE, True)  # twice: still one
+        w = app.db.all("SELECT * FROM watches")
+        self.assertEqual([(x["name"], x["query"], x["since"], x["follow"], x["user_id"]) for x in w],
+                         [("Following Name 1111", f"performers={SCENE}", d.today(), f"performer:{SCENE}", self.guest["id"])])
+        self.assertEqual(app.whisparr.calls, [])                                  # Whisparr isn't told
+        self.assertFalse(app.follow_state(self.admin, "performer", SCENE)["followed"])  # the guest's
+        self.assertEqual([f["id"] for f in app.follows(self.guest, "performer")], [SCENE])
+        self.assertEqual(app.favourite_performers(self.guest), {SCENE})
+        self.assertEqual(app.favourite_performers(self.admin), set())
+
+    def test_unfollow_keeps_the_requests(self):
+        app = self.app
+        app.set_follow(self.guest, "studio", SCENE, True)
+        wid = app.db.one("SELECT id FROM watches")["id"]
+        app.db.run("INSERT INTO requests(scene_id, title, user_id, status, created, via, watch_id) "
+                   "VALUES (?, 't', ?, 'pending', 0, 'Following Name 1111', ?)", (OTHER, self.guest["id"], wid))
+        self.assertEqual(app.set_follow(self.guest, "studio", SCENE, False), {"followed": False, "since": None})
+        self.assertEqual(app.db.all("SELECT * FROM watches"), [])
+        self.assertEqual(len(app.db.all("SELECT * FROM requests")), 1)
+
+    def test_other_filters_make_it_a_plain_saved_search(self):
+        app = self.app
+        app.set_follow(self.guest, "performer", SCENE, True)
+        wid = app.db.one("SELECT id FROM watches")["id"]
+        app.save_watch(self.guest, {"query": f"performers={SCENE}&tags={TAG}"}, wid)
+        self.assertFalse(app.follow_state(self.guest, "performer", SCENE)["followed"])
+
+    def test_whisparr_follows_are_taken_over(self):
+        self.assertEqual(self.app.adopt_whisparr_follows(), ["performer Old Follow"])
+        w = self.app.db.one("SELECT * FROM watches")
+        self.assertEqual((w["user_id"], w["since"], w["follow"]), (self.admin["id"], "2026-10-30", f"performer:{OTHER}"))
+        self.assertEqual((self.put[0]["id"], self.put[0]["monitored"]), (3, False))
+
+    def test_nothing_taken_over_without_an_admin(self):
+        self.app.db.run("DELETE FROM users WHERE is_admin = 1")
+        self.assertEqual(self.app.adopt_whisparr_follows(), [])
+        self.assertEqual(self.put, [])
 
 
 class Init(unittest.TestCase):
@@ -413,7 +453,10 @@ class Similar(unittest.TestCase):
         stash.tags = {}
         self.listed, self.pairs, self.queries = [], {}, []  # StashDB's answer to every search
         self.favs = ["w1"]                                                  # StashDB favourites
-        self.app.whisparr.followed = {"performers": [{"id": "f2"}, {"id": "f3"}], "studios": []}
+        self.followed = ["f2", "f3"]                                         # the user follows
+        self.app.follows = lambda user, kind=None: [
+            {"kind": "performer", "id": i, "name": i, "since": "2026-11-01", "watch_id": 0}
+            for i in self.followed] if user else []
         self.feel = {"A": 1, "D": 1, "E": -1}  # liked A and D, disliked E
         self.app.feelings = lambda user: self.feel if user else {}
 
@@ -515,7 +558,7 @@ class Similar(unittest.TestCase):
         self.app.stash.tags = {"z1": ["E", "A"], "z2": ["H"], "z4": ["A"]}
         self.assertEqual([sc["id"] for sc in self.app.new_with_favourites({"id": 1})], ["z3", "z4"])
         self.assertEqual(self.queries[-1]["performers"], {"value": ["f2", "f3", "w1"], "modifier": "INCLUDES"})
-        self.favs, self.app.whisparr.followed = [], {"performers": [], "studios": []}
+        self.favs, self.followed = [], []
         self.assertEqual(self.app.new_with_favourites({"id": 1}), [])
 
     def test_discover_is_kept_for_an_hour(self):
@@ -569,7 +612,7 @@ class Similar(unittest.TestCase):
         self.assertEqual(rows, {"inner": ["x1"], "together": ["t2", "t3", "t1"]})  # t1 only once
 
     def test_without_favourites_or_tags(self):
-        self.favs, self.app.whisparr.followed = [], {"performers": [], "studios": []}
+        self.favs, self.followed = [], []
         self.listed = [self.card("y2", "w2"), self.card("y7", "f9")]
         self.app.stash.tags = {"y7": ["A"]}
         self.assertEqual(self.rows(), {"discover": ["y2", "y7"]})  # w2 5, A 5: StashDB's order
@@ -726,7 +769,8 @@ class Http(unittest.TestCase):
         self.req("POST", "/api/logout")
         self.req("POST", "/api/login", {"username": "guest", "password": "password1"})
         self.assertEqual(self.req("GET", "/api/settings")[0], 403)
-        self.assertEqual(self.req("POST", "/api/follow", {"kind": "performer", "id": SCENE, "follow": True})[0], 403)
+        self.assertEqual(self.req("POST", "/api/follow", {"kind": "performer", "id": SCENE, "follow": True})[1],
+                         {"followed": True, "since": d.today()})  # anyone: their own saved search
         self.assertEqual(self.req("POST", "/api/favorite", {"kind": "performer", "id": SCENE, "favorite": True})[0], 403)
         self.assertEqual(self.req("POST", "/api/notify-test")[0], 403)
         self.assertEqual(self.req("POST", "/api/requests/search-stalled")[0], 403)
