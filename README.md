@@ -27,7 +27,9 @@ or available.
 
   The first two look among StashDB's most popular scenes with this one's action tags and with
   those performers, and add the tags: a tag this scene has too counts 1, one of your favourite
-  tags 2, both 5.
+  tags 2, both 5, and a tag you dislike (the button on a tag's page) -5. A scene with a
+  disliked tag is never in the first reel, and in Discover only if its favourite tags
+  outweigh its disliked ones.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.

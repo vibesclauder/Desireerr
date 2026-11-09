@@ -215,6 +215,8 @@ a.chip:hover, button.chip:hover { border-color: var(--accent-hi); color: var(--f
 button.chip { cursor: pointer; }
 .chip.fav { border-color: rgba(251,113,133,.55); }
 .chip.fav svg { width: 12px; height: 12px; color: var(--accent); }
+.chip.disliked { opacity: .6; text-decoration: line-through; text-decoration-color: rgba(255,255,255,.35); }
+.chip.disliked svg { width: 12px; height: 12px; }
 .chip.inc { background: rgba(225,29,72,.16); border-color: rgba(251,113,133,.55); color: #ffe4e6; }
 .chip.exc { background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.4); color: #fca5a5; text-decoration: line-through; text-decoration-color: rgba(252,165,165,.6); }
 .chip .x { width: 16px; height: 16px; border-radius: 99px; display: grid; place-items: center; background: rgba(255,255,255,.08); cursor: pointer; border: 0; padding: 0; }

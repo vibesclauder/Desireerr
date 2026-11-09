@@ -398,6 +398,8 @@ class Similar(unittest.TestCase):
         self.favs = ["w1"]                                                  # StashDB favourites
         self.app.whisparr.followed = {"performers": [{"id": "f2"}, {"id": "f3"}], "studios": []}
         self.app.fav_tag_ids = lambda user: ["A", "D"] if user else []
+        self.disliked = ["E"]
+        self.app.disliked_tag_ids = lambda user: self.disliked if user else []
 
         def query_scenes(inp, ttl=300):
             self.queries.append(inp)
@@ -452,6 +454,22 @@ class Similar(unittest.TestCase):
         self.app.stash.tags = {"y2": ["B", "C"], "y3": ["A"], "y4": ["D"]}
         self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4"])  # 7, 1, 0
 
+    def test_disliked_tags(self):
+        self.listed = [self.card("x1", "w1"), self.card("x2", "w1"),
+                       self.card("y1"), self.card("y2"), self.card("y3"), self.card("y4")]
+        self.app.stash.tags = {"x1": ["E"], "x2": ["A"], "y1": ["E"], "y2": ["E", "A"],
+                               "y3": ["E", "A", "D"], "y4": ["B"]}
+        rows = self.rows()
+        self.assertEqual(rows["inner"], ["x2"])            # never with the favourites
+        self.assertEqual(rows["discover"], ["y3", "y4"])  # y3: 5 + 2 > 5, so 2; y2: 5, not more
+        self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4", "y1"])  # not for nobody
+
+    def test_disliked_tags_are_not_searched_for(self):
+        self.disliked = ["B"]
+        self.rows()
+        self.assertTrue(self.asked(None, ["A"]))
+        self.assertFalse(any("B" in (q.get("tags") or {}).get("value", []) for q in self.queries))
+
     def test_together_again_most_of_the_cast_then_newest(self):
         self.pairs = {("w1", "w2"): [self.card("t1", "w1", "w2", date="2020-01-01"),
                                       self.card(SCENE, "w1", "w2")],
@@ -488,6 +506,31 @@ class Similar(unittest.TestCase):
         self.assertEqual(self.rows(), {"inner": ["x1"]})
         with self.assertRaises(d.ApiError):
             self.app.similar("nope")
+
+
+class TagFeelings(unittest.TestCase):
+    TAG = "aaaaaaaa-0000-0000-0000-000000000001"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = make_app(self.tmp.name)
+        self.user = {"id": self.app.db.run(
+            "INSERT INTO users(username, pw_salt, pw_hash, created) VALUES ('u', '', '', 0)")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_tag_is_favourite_or_disliked_not_both(self):
+        app, u = self.app, self.user
+        app.set_fav_tag(u, self.TAG, True)
+        self.assertEqual(app.set_disliked_tag(u, self.TAG, True), [{"id": self.TAG, "name": "Tag 1"}])
+        self.assertEqual(app.fav_tag_ids(u), [])
+        app.set_fav_tag(u, self.TAG, True)
+        self.assertEqual((app.fav_tag_ids(u), app.disliked_tag_ids(u)), ([self.TAG], []))
+        app.set_disliked_tag(u, self.TAG, False)  # not disliked: still a favourite
+        self.assertEqual(app.fav_tag_ids(u), [self.TAG])
+        with self.assertRaises(d.ApiError):
+            app.set_disliked_tag(u, "bbbbbbbb-0000-0000-0000-000000000001", True)
 
 
 class Images(unittest.TestCase):
@@ -596,6 +639,12 @@ class Http(unittest.TestCase):
         self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1"}]))
         self.assertEqual(self.req("GET", "/api/status")[1]["fav_tags"], [{"id": TAG, "name": "Tag 1"}])
         self.assertEqual(self.req("POST", "/api/favorite-tags", {"id": "x\" evil"})[0], 400)
+        status, out = self.req("POST", "/api/disliked-tags", {"id": TAG, "disliked": True})
+        self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1"}]))
+        status, out = self.req("GET", "/api/status")
+        self.assertEqual((out["fav_tags"], out["disliked_tags"]), ([], [{"id": TAG, "name": "Tag 1"}]))
+        self.assertTrue(self.req("GET", f"/api/tag/{TAG}")[1]["is_disliked"])
+        self.assertEqual(self.req("POST", "/api/disliked-tags", {"id": "x\" evil"})[0], 400)
 
     def test_status_remembers_where_the_app_is_opened(self):
         self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
