@@ -80,6 +80,8 @@ FEELINGS = {"love": 2, "like": 1, "dislike": -1, "hate": -2}  # a user's for a t
 # Under a scene, what a tag of another scene adds: (as it is, if this scene has it too).
 FEELING_SCORE = {2: (4, 10), 1: (2, 5), 0: (0, 1), -1: (-5, -5)}  # hate: never recommended
 SIMILAR_TTL = 3600
+DISCOVER_ROW = 20            # scenes in a Discover row
+DISCOVER_POOL = 100          # "New with tags you love or like" picks from this many newest
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -1225,6 +1227,33 @@ def clamp_int(value, default, lo, hi):
         return default
 
 
+def weigh_tags(tags, feel, mine=frozenset()):
+    """What a scene's TAGS add by the user's feelings for them (FEEL: tag ID -> feeling), as
+    FEELING_SCORE has it, MINE being the tags of the scene it's compared with: (what its loved
+    and liked tags add, what its neutral ones add, what its disliked ones take off, whether it
+    has a hated one)."""
+    liked = neutral = disliked = 0
+    for t in set(tags):
+        f = feel.get(t, 0)
+        if f == FEELINGS["hate"]:
+            return 0, 0, 0, True
+        points = FEELING_SCORE[f][t in mine]
+        if f > 0:
+            liked += points
+        elif f < 0:
+            disliked -= points
+        else:
+            neutral += points
+    return liked, neutral, disliked, False
+
+
+def recommendable(weights, outweigh=True):
+    """Never with a hated tag; with a disliked one only if OUTWEIGH and the loved and liked ones
+    outweigh it."""
+    liked, _, disliked, hated = weights
+    return not hated and (not disliked or outweigh and liked > disliked)
+
+
 def id_list(value):
     return [v for v in (value or "").split(",") if re.fullmatch(r"[0-9a-fA-F-]{8,40}", v)]
 
@@ -1676,19 +1705,13 @@ class App:
         return out
 
     def discover(self, user):
-        favs = self.fav_tag_ids(user)
         specs = [
             ("trending", "Trending", lambda: self.stash.query_scenes(
                 {"page": 1, "per_page": 20, "sort": "TRENDING", "direction": "DESC"})["scenes"],
              "/scenes?sort=TRENDING"),
-            ("favorites", "New from your StashDB favourites", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC", "favorites": "ALL",
-                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
-             "/scenes?favorites=ALL"),
-            ("favtags", "New with tags you love or like", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
-                 "tags": {"value": favs, "modifier": "INCLUDES"},
-                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"] if favs else [],
+            ("favorites", "New scenes with favourite performers", lambda: self.new_with_favourites(user),
+             None),
+            ("favtags", "New with tags you love or like", lambda: self.new_with_loved_tags(user),
              "/scenes?fav_tags=1"),
             ("added", "Recently added", self.recent_library, None),
             ("new", "New releases", lambda: self.stash.query_scenes(
@@ -1720,6 +1743,50 @@ class App:
             self.decorate(r)
         return {"rows": rows, "requests": mine, "followed": self.whisparr.followed,
                 "whisparr_error": self.whisparr.error}
+
+    def new_with_favourites(self, user):
+        """Discover's row: the newest scenes with the favourite performers (StashDB favourites
+        and those Whisparr follows, as under a scene), none with a tag the user hates or
+        dislikes."""
+        favs = self.favourite_performers()
+        if not favs:
+            return []
+        scenes = self.stash.query_scenes(
+            {"page": 1, "per_page": DISCOVER_ROW + 10, "sort": "DATE", "direction": "DESC",
+             "performers": {"value": sorted(favs)[:SIMILAR_FAVS], "modifier": "INCLUDES"},
+             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"]
+        return self.by_feelings(scenes, user, rank=False)[:DISCOVER_ROW]
+
+    def new_with_loved_tags(self, user):
+        """Discover's row: among the newest DISCOVER_POOL scenes with any tag the user loves or
+        likes, the ones those weigh most in (as under a scene: a loved tag 4, a liked one 2, a
+        disliked one -5; one with a hated tag, or more disliked than loved and liked, not at
+        all), the newest first among equals."""
+        favs = self.fav_tag_ids(user)
+        if not favs:
+            return []
+        scenes = self.stash.query_scenes(
+            {"page": 1, "per_page": DISCOVER_POOL, "sort": "DATE", "direction": "DESC",
+             "tags": {"value": favs, "modifier": "INCLUDES"},
+             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"]
+        return self.by_feelings(scenes, user)[:DISCOVER_ROW]
+
+    def by_feelings(self, scenes, user, rank=True):
+        """SCENES without those the user's tag feelings rule out (with RANK, a disliked tag can be
+        outweighed), best first if RANK, else in their order. If StashDB can't say their tags,
+        as they are."""
+        feel = self.feelings(user)
+        if not feel:
+            return scenes
+        try:
+            tags = self.scene_tags([sc["id"] for sc in scenes])
+        except ApiError:
+            return scenes
+        weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel) for sc in scenes}
+        kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
+        if rank:  # sorted is stable: the newest first among equals
+            kept.sort(key=lambda sc: weights[sc["id"]][2] - weights[sc["id"]][0])
+        return kept
 
     def recent_library(self):
         self.whisparr.ensure_fresh()
@@ -1842,32 +1909,13 @@ class App:
         except ApiError:
             their_tags = {}
 
-        def weigh(sc):
-            """(what its loved and liked tags add, what its neutral ones add, what its disliked
-            ones take off, whether it has a hated one)"""
-            liked = neutral = disliked = 0
-            for t in set(their_tags.get(sc["id"], ())):
-                f = feel.get(t, 0)
-                if f == FEELINGS["hate"]:
-                    return 0, 0, 0, True
-                points = FEELING_SCORE[f][t in mine]
-                if f > 0:
-                    liked += points
-                elif f < 0:
-                    disliked -= points
-                else:
-                    neutral += points
-            return liked, neutral, disliked, False
-        weights = {sid: weigh(sc) for sid, sc in {**inner, **outer}.items()}
+        weights = {sid: weigh_tags(their_tags.get(sid, ()), feel, mine) for sid in {**inner, **outer}}
 
         def tag_score(sc):
             liked, neutral, disliked, _ = weights[sc["id"]]
             return liked + neutral - disliked
-        def allowed(sid, discover):
-            liked, _, disliked, hated = weights[sid]
-            return not hated and (not disliked or discover and liked > disliked)
-        inner = {sid: sc for sid, sc in inner.items() if allowed(sid, False)}
-        outer = {sid: sc for sid, sc in outer.items() if allowed(sid, True)}
+        inner = {sid: sc for sid, sc in inner.items() if recommendable(weights[sid], outweigh=False)}
+        outer = {sid: sc for sid, sc in outer.items() if recommendable(weights[sid])}
 
         def ranked(found, score):
             order = {sid: n for n, sid in enumerate(found)}
@@ -2823,6 +2871,8 @@ def cmd_init(argv):
     except ApiError as e:
         print(f"desireerr init: {e.message}", file=sys.stderr)
         return 1
+    finally:
+        app.db.conn.close()
     print("\n".join(done))
     return 0
 

@@ -68,8 +68,17 @@ def scene(sid=SCENE):
                        {"url": "https://cdn.stashdb.org/b", "width": 600, "height": 900}]}
 
 
+OPEN = []  # the apps' databases, closed when the tests are done
+
+
+def tearDownModule():
+    while OPEN:
+        OPEN.pop().conn.close()
+
+
 def make_app(tmp, routes=None):
     app = d.App(Path(tmp) / "data", Path(tmp) / "cache")
+    OPEN.append(app.db)
     app.whisparr = FakeWhisparr(app.db, routes or {})
     app.whisparr.index_time = app.whisparr.queue_time = 9e18  # never refresh on its own
     app.stash = FakeStash({SCENE: scene(), OTHER: scene(OTHER)})
@@ -286,8 +295,13 @@ class Init(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def app(self, setup_code=False):
+        app = d.App(self.data, None, setup_code=setup_code)
+        OPEN.append(app.db)
+        return app
+
     def run_init(self, user="alice", password="pw", key=""):
-        app = d.App(self.data, None, setup_code=False)
+        app = self.app()
         return app, d.init(app, user, password, key)
 
     def users(self, app):
@@ -317,14 +331,14 @@ class Init(unittest.TestCase):
         self.assertTrue(d.check_password("new2", user["pw_salt"], user["pw_hash"]))
 
     def test_an_admin_made_by_hand_is_left_alone(self):
-        app = d.App(self.data, None, setup_code=False)
+        app = self.app()
         app.create_user("carol", "handmade1", is_admin=True)
         app, done = self.run_init()
         self.assertEqual(done[0], "has its own admin, made on its first visit; not changing it")
         self.assertEqual(self.users(app), [("carol", 1)])
 
     def test_same_login_made_by_hand_is_adopted(self):
-        app = d.App(self.data, None, setup_code=False)
+        app = self.app()
         app.create_user("alice", "pw-by-hand", is_admin=True)
         _, done = self.run_init(password="pw-by-hand")
         self.assertEqual(done[0], "admin 'alice': up to date")
@@ -339,7 +353,7 @@ class Init(unittest.TestCase):
         self.assertEqual(app.db.setting("stashdb_key"), "MINE")
 
     def test_removes_the_setup_code(self):
-        app = d.App(self.data, None)
+        app = self.app(setup_code=True)
         self.assertTrue((self.data / "setup-code").exists())
         self.run_init()
         self.assertFalse((self.data / "setup-code").exists())
@@ -479,6 +493,28 @@ class Similar(unittest.TestCase):
         self.assertEqual(rows["inner"], ["x2"])            # x1 has a hated tag
         self.assertEqual(rows["discover"], ["y2", "y4"])  # y2: 10 > 5, so 5; y1: 4, not more than 5
 
+    def test_discover_new_with_loved_tags_best_first(self):
+        self.feel = {"A": 2, "D": 1, "E": -1, "H": -2}
+        self.app.fav_tag_ids = lambda user: ["A", "D"]
+        self.listed = [self.card(n) for n in ("n1", "n2", "n3", "n4", "n5", "n6", "n7")]  # newest first
+        self.app.stash.tags = {"n1": ["D"], "n2": ["A"], "n3": ["A", "E"], "n4": ["A", "D"],
+                               "n5": ["H", "A"], "n6": ["D"], "n7": ["A", "D", "E"]}
+        got = [sc["id"] for sc in self.app.new_with_loved_tags({"id": 1})]
+        self.assertEqual(got, ["n4", "n2", "n1", "n6", "n7"])  # 6, 4, 2, 2, 1; n3 4 < 5; n5 hated
+        self.assertEqual((self.queries[-1]["tags"], self.queries[-1]["sort"], self.queries[-1]["per_page"]),
+                         ({"value": ["A", "D"], "modifier": "INCLUDES"}, "DATE", d.DISCOVER_POOL))
+        self.app.fav_tag_ids = lambda user: []
+        self.assertEqual(self.app.new_with_loved_tags({"id": 1}), [])
+
+    def test_discover_new_with_favourite_performers(self):
+        self.feel = {"A": 1, "E": -1, "H": -2}
+        self.listed = [self.card("z1", "w1"), self.card("z2", "f2"), self.card("z3", "f3"), self.card("z4", "w1")]
+        self.app.stash.tags = {"z1": ["E", "A"], "z2": ["H"], "z4": ["A"]}
+        self.assertEqual([sc["id"] for sc in self.app.new_with_favourites({"id": 1})], ["z3", "z4"])
+        self.assertEqual(self.queries[-1]["performers"], {"value": ["f2", "f3", "w1"], "modifier": "INCLUDES"})
+        self.favs, self.app.whisparr.followed = [], {"performers": [], "studios": []}
+        self.assertEqual(self.app.new_with_favourites({"id": 1}), [])
+
     def test_together_again_most_of_the_cast_then_newest(self):
         self.pairs = {("w1", "w2"): [self.card("t1", "w1", "w2", date="2020-01-01"),
                                       self.card(SCENE, "w1", "w2")],
@@ -550,6 +586,7 @@ class TagFeelings(unittest.TestCase):
         conn.execute("INSERT INTO favorite_tags VALUES (?, 'f', 'Fav', 0)", (self.user["id"],))
         conn.execute("INSERT INTO disliked_tags VALUES (?, 'd', 'Dis', 0)", (self.user["id"],))
         db = d.DB(path)
+        OPEN.append(db)
         self.assertEqual(db.all("SELECT tag_id, feeling FROM tag_feelings ORDER BY tag_id"),
                          [{"tag_id": "d", "feeling": -1}, {"tag_id": "f", "feeling": 1}])
         self.assertEqual(db.all("SELECT name FROM sqlite_master WHERE name LIKE '%_tags'"), [])
