@@ -81,6 +81,7 @@ FEELINGS = {"love": 2, "like": 1, "dislike": -1, "hate": -2}  # a user's for a t
 FEELING_SCORE = {2: (4, 10), 1: (2, 5), 0: (0, 1), -1: (-5, -5)}  # hate: never recommended
 SIMILAR_TTL = 3600
 DISCOVER_ROW = 20            # scenes in a Discover row
+DISCOVER_TTL = 3600          # Discover's StashDB rows are kept this long (Reload: anew)
 DISCOVER_POOL = 100          # "New with tags you love or like" picks from this many newest
 
 DEFAULT_SETTINGS = {
@@ -1270,6 +1271,8 @@ class App:
         self.images = Images(cache_dir) if cache_dir else None
         self.watch_lock = threading.Lock()
         self.nfo_missing = {}    # scene id -> when StashDB didn't have it
+        self.discover_cache = {}  # user id -> (when made, {row key: row}), see discover
+        self.discover_lock = threading.Lock()
         self.nfo_error = ""
         self.failures = {}       # ip -> (count, last time), for login throttling
         self.setup_code = self.load_setup_code() if setup_code else ""
@@ -1691,6 +1694,7 @@ class App:
         # Their saved searches with favourite tags look through the matches again.
         self.db.run("UPDATE watches SET cursor = '' WHERE user_id = ? AND query LIKE '%fav_tags=1%'",
                     (user["id"],))
+        self.forget_discover(user)
         return self.tag_feelings(user)
 
     def scene_tags(self, ids):
@@ -1704,47 +1708,70 @@ class App:
             out[kind] = self.stash.names(kind, ids) if ids else {}
         return out
 
-    def discover(self, user):
+    def discover(self, user, fresh=False):
+        """Discover's rows. StashDB's are kept for DISCOVER_TTL per user (until their tag
+        feelings, the favourites or the follows change); FRESH makes them again, StashDB asked
+        anew. The scenes' states, the user's requests and Recently added are always current."""
+        ttl = 0 if fresh else 300
         specs = [
             ("trending", "Trending", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": 20, "sort": "TRENDING", "direction": "DESC"})["scenes"],
+                {"page": 1, "per_page": DISCOVER_ROW, "sort": "TRENDING", "direction": "DESC"}, ttl)["scenes"],
              "/scenes?sort=TRENDING"),
-            ("favorites", "New scenes with favourite performers", lambda: self.new_with_favourites(user),
+            ("favorites", "New scenes with favourite performers", lambda: self.new_with_favourites(user, ttl),
              None),
-            ("favtags", "New with tags you love or like", lambda: self.new_with_loved_tags(user),
+            ("favtags", "New with tags you love or like", lambda: self.new_with_loved_tags(user, ttl),
              "/scenes?fav_tags=1"),
             ("added", "Recently added", self.recent_library, None),
             ("new", "New releases", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
-                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
+                {"page": 1, "per_page": DISCOVER_ROW, "sort": "DATE", "direction": "DESC",
+                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}}, ttl)["scenes"],
              "/scenes?sort=DATE"),
             ("popular", "Popular", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": 20, "sort": "POPULARITY", "direction": "DESC"})["scenes"],
+                {"page": 1, "per_page": DISCOVER_ROW, "sort": "POPULARITY", "direction": "DESC"}, ttl)["scenes"],
              "/scenes?sort=POPULARITY"),
         ]
+        with self.discover_lock:
+            made, kept = self.discover_cache.get(user["id"], (0, {}))
+            if fresh or time.time() - made > DISCOVER_TTL:
+                made, kept = time.time(), {}
         timing = Timing.current()
 
         def row(spec):
             key, title, fn, link = spec
             Timing.begin(timing)  # this thread works for the same request
             try:
-                return {"key": key, "title": title, "link": link, "scenes": self.annotate(fn())}
+                return {"key": key, "title": title, "link": link, "scenes": fn()}
             except ApiError as e:
                 return {"key": key, "title": title, "link": link, "scenes": [], "error": e.message}
 
         # The rows wait on StashDB, not on us: ask for all of them at once. Whisparr's
         # state is brought up to date first, so the rows don't each refresh it.
         self.whisparr.ensure_fresh()
-        with ThreadPoolExecutor(len(specs)) as pool:
-            rows = list(pool.map(row, specs))
+        todo = [spec for spec in specs if spec[0] not in kept]
+        with ThreadPoolExecutor(max(1, len(todo))) as pool:
+            rows = {r["key"]: r for r in pool.map(row, todo)}
+        keep = {k: r for k, r in rows.items() if k != "added" and not r.get("error")}
+        with self.discover_lock:
+            self.discover_cache[user["id"]] = (made, {**kept, **keep})
+        rows.update(kept)
+        out = [dict(rows[key], scenes=self.annotate([dict(sc) for sc in rows[key]["scenes"]]))
+               for key, *_ in specs]
         mine = self.db.all("SELECT * FROM requests WHERE user_id = ? ORDER BY id DESC LIMIT 12",
                            (user["id"],))
         for r in mine:
             self.decorate(r)
-        return {"rows": rows, "requests": mine, "followed": self.whisparr.followed,
-                "whisparr_error": self.whisparr.error}
+        return {"rows": out, "requests": mine, "followed": self.whisparr.followed,
+                "whisparr_error": self.whisparr.error, "updated": made}
 
-    def new_with_favourites(self, user):
+    def forget_discover(self, user=None):
+        """Discover's rows are made again next time: the user's, or (no USER) everyone's."""
+        with self.discover_lock:
+            if user:
+                self.discover_cache.pop(user["id"], None)
+            else:
+                self.discover_cache.clear()
+
+    def new_with_favourites(self, user, ttl=300):
         """Discover's row: the newest scenes with the favourite performers (StashDB favourites
         and those Whisparr follows, as under a scene), none with a tag the user hates or
         dislikes."""
@@ -1754,10 +1781,10 @@ class App:
         scenes = self.stash.query_scenes(
             {"page": 1, "per_page": DISCOVER_ROW + 10, "sort": "DATE", "direction": "DESC",
              "performers": {"value": sorted(favs)[:SIMILAR_FAVS], "modifier": "INCLUDES"},
-             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"]
+             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}}, ttl)["scenes"]
         return self.by_feelings(scenes, user, rank=False)[:DISCOVER_ROW]
 
-    def new_with_loved_tags(self, user):
+    def new_with_loved_tags(self, user, ttl=300):
         """Discover's row: among the newest DISCOVER_POOL scenes with any tag the user loves or
         likes, the ones those weigh most in (as under a scene: a loved tag 4, a liked one 2, a
         disliked one -5; one with a hated tag, or more disliked than loved and liked, not at
@@ -1768,7 +1795,7 @@ class App:
         scenes = self.stash.query_scenes(
             {"page": 1, "per_page": DISCOVER_POOL, "sort": "DATE", "direction": "DESC",
              "tags": {"value": favs, "modifier": "INCLUDES"},
-             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"]
+             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}}, ttl)["scenes"]
         return self.by_feelings(scenes, user)[:DISCOVER_ROW]
 
     def by_feelings(self, scenes, user, rank=True):
@@ -2023,6 +2050,7 @@ class App:
         Whisparr isn't touched, so nothing is downloaded for it (Follow does that). Should
         Whisparr's StashDB import list be on, it adds favourites by itself."""
         self.stash.set_favorite(kind, sid, favorite)
+        self.forget_discover()
         return {"is_favorite": bool(favorite)}
 
     # -- saved searches ---------------------------------------------------------------
@@ -2224,6 +2252,7 @@ class App:
                 self.stash.me(key=key)          # raises if StashDB refuses it
             allowed["stashdb_key"] = key
             self.stash.cache.clear()
+            self.forget_discover()
         if "whisparr_url" in body:
             url = str(body["whisparr_url"]).strip().rstrip("/") or DEFAULT_WHISPARR
             if not re.match(r"^https?://", url):
@@ -2566,7 +2595,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # -- browsing --
         if key == ("GET", "discover"):
-            return 200, app.discover(user), None
+            return 200, app.discover(user, fresh=q.get("fresh") == "1"), None
         if key == ("GET", "scenes"):
             return 200, app.browse_scenes(q, user), None
         if key == ("GET", "scene") and len(parts) == 2:
@@ -2615,7 +2644,9 @@ class Handler(BaseHTTPRequestHandler):
             kind = body.get("kind")
             if kind not in ("performer", "studio") or not id_list(body.get("id")):
                 raise ApiError(400, "Follow takes a performer or studio ID.")
-            return 200, app.whisparr.set_follow(kind, body["id"], bool(body.get("follow"))), None
+            out = app.whisparr.set_follow(kind, body["id"], bool(body.get("follow")))
+            app.forget_discover()
+            return 200, out, None
 
         # -- requests --
         if key == ("POST", "requests") and len(parts) == 1:

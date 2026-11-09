@@ -1103,17 +1103,19 @@ function closeLightbox() {
 // Views
 // ---------------------------------------------------------------------------------------
 
-async function viewDiscover(view, ctx) {
-  const d = await api("discover");
+// StashDB's rows are kept an hour on the server; Reload makes them again.
+async function viewDiscover(view, ctx, fresh = false) {
+  const d = await api("discover" + (fresh ? "?fresh=1" : ""));
   if (!ctx.alive()) return;
-  const parts = [];
+  const parts = [html`<div class="page-title"><h1>Discover</h1><span class="sub" title="${new Date(d.updated * 1000).toLocaleString()}">Updated ${fmtAgo(d.updated)}</span>
+    <button class="btn small ghost" type="button" id="reload" style="margin-left:auto" title="The rows from StashDB are kept for an hour; this asks StashDB again now">${icon("refresh")}Reload</button></div>`];
   if (d.whisparr_error) parts.push(html`<div class="error-box">Whisparr: ${d.whisparr_error}</div>`);
   if (d.requests.length) parts.push(slider("Your recent requests", d.requests, "reqs", "/requests", (r) => requestRow(r, { compact: true })));
   const rows = Object.fromEntries(d.rows.map((r) => [r.key, r]));
   const errors = new Set(d.rows.map((r) => r.error));
   if (errors.size === 1 && d.rows[0].error) {
     // StashDB is out (no key, refused, unreachable): say so once instead of per row.
-    parts.unshift(errorBox(new Error(d.rows[0].error)));
+    parts.splice(1, 0, errorBox(new Error(d.rows[0].error)));
     d.rows = [];
     for (const k in rows) delete rows[k];
   }
@@ -1132,6 +1134,14 @@ async function viewDiscover(view, ctx) {
   if (d.followed?.studios?.length) parts.push(slider("Studios you follow", d.followed.studios.map((s) => ({ ...s, followed: true })), "people", null, studioCard));
   sceneRow("popular");
   view.innerHTML = html`<div class="page">${parts}</div>`.s;
+  $("#reload", view).onclick = async (e) => {
+    const btn = e.currentTarget, y = window.scrollY;
+    btn.classList.add("busy");
+    try {
+      await viewDiscover(view, ctx, true);
+      restoreScroll(y);
+    } catch (err) { btn.classList.remove("busy"); toast(err.message, true); }
+  };
 }
 
 async function viewScenes(view, ctx) {

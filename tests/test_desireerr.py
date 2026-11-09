@@ -43,6 +43,9 @@ class FakeStash:
     def find_scene(self, sid):
         return self.scenes.get(sid)
 
+    def find_scenes(self, ids):
+        return [self.scenes[i] for i in ids if i in self.scenes]
+
     def query_scenes(self, inp, ttl=300):
         self.queries.append(dict(inp))
         start = (inp["page"] - 1) * inp["per_page"]
@@ -515,6 +518,45 @@ class Similar(unittest.TestCase):
         self.favs, self.app.whisparr.followed = [], {"performers": [], "studios": []}
         self.assertEqual(self.app.new_with_favourites({"id": 1}), [])
 
+    def test_discover_is_kept_for_an_hour(self):
+        user = {"id": 1}
+        self.app.fav_tag_ids = lambda u: ["A"]
+        self.listed = [self.card("n1", "w1")]
+        first = self.app.discover(user)
+        asked = len(self.queries)
+        self.assertTrue(asked)
+        again = self.app.discover(user)
+        self.assertEqual(len(self.queries), asked)                         # StashDB not asked
+        self.assertEqual(again["rows"], first["rows"])
+        self.assertEqual(again["updated"], first["updated"])
+        self.assertEqual([r["key"] for r in again["rows"]], ["trending", "favorites", "favtags", "added", "new", "popular"])
+        self.app.discover({"id": 2})                                       # per user
+        self.assertGreater(len(self.queries), asked)
+        asked = len(self.queries)
+        self.app.forget_discover(user)
+        self.app.discover(user)
+        self.assertGreater(len(self.queries), asked)
+        asked = len(self.queries)
+        with unittest.mock.patch.object(d, "DISCOVER_TTL", -1):         # an hour later
+            self.app.discover(user)
+        self.assertGreater(len(self.queries), asked)
+
+    def test_discover_reload_asks_stashdb_anew(self):
+        ttls = []
+        queries = self.app.stash.query_scenes
+        self.app.stash.query_scenes = lambda inp, ttl=300: ttls.append(ttl) or queries(inp, ttl)
+        self.app.discover({"id": 1})
+        self.app.discover({"id": 1}, fresh=True)
+        self.assertTrue(ttls and ttls[0] and set(ttls[len(ttls) // 2:]) == {0})
+
+    def test_discover_keeps_no_errors(self):
+        queries = self.app.stash.query_scenes
+        fail = [True]
+        self.app.stash.query_scenes = lambda inp, ttl=300: queries(dict(inp, fail=fail[0] and inp["sort"] == "TRENDING"), ttl)
+        self.assertIn("error", self.app.discover({"id": 1})["rows"][0])
+        fail[0] = False
+        self.assertNotIn("error", self.app.discover({"id": 1})["rows"][0])  # asked again
+
     def test_together_again_most_of_the_cast_then_newest(self):
         self.pairs = {("w1", "w2"): [self.card("t1", "w1", "w2", date="2020-01-01"),
                                       self.card(SCENE, "w1", "w2")],
@@ -577,6 +619,15 @@ class TagFeelings(unittest.TestCase):
         self.assertEqual(app.set_tag_feeling(u, self.TAG, "neutral"), [])
         with self.assertRaises(d.ApiError):
             app.set_tag_feeling(u, "bbbbbbbb-0000-0000-0000-000000000001", "hate")
+
+    def test_a_feeling_or_favourite_makes_discover_again(self):
+        app, u = self.app, self.user
+        app.discover_cache = {u["id"]: (1, {}), 99: (1, {})}
+        app.set_tag_feeling(u, self.TAG, "love")
+        self.assertEqual(list(app.discover_cache), [99])  # only theirs
+        app.stash.set_favorite = lambda *a: None
+        app.set_favorite("performer", self.TAG, True)
+        self.assertEqual(app.discover_cache, {})         # favourites: everyone's
 
     def test_old_favourite_and_disliked_tags_move_over(self):
         path = self.app.db.path

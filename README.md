@@ -17,6 +17,9 @@ or available.
   favourites and change settings. Other users' requests wait for approval unless they're auto-approved.
 - **Saved searches.** Any filter on the Scenes page (tags in and out, performers, studios,
   favourites) can request its new scenes every hour, which Whisparr's follows can't.
+- **Discover.** Trending, new and popular scenes, new ones with your favourite performers and
+  with the tags you love or like, and what was added lately. StashDB's rows are kept for an
+  hour (sooner if your feelings, favourites or follows change); Reload asks again now.
 - **Scene pages.** The cast with their ages then and now (and a † for those who died), and
   reels at the bottom:
   - *Similar scenes with favourite performers*: scenes with your StashDB favourites or the
