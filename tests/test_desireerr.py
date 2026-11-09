@@ -920,7 +920,7 @@ class Nfo(unittest.TestCase):
         self.puts = []
 
         def put(body, params):
-            self.puts.append(body["fields"][0]["value"])
+            self.puts.append(body["enable"])
             self.kodi = json.loads(json.dumps(body))
             return body
         self.app = make_app(self.tmp.name, {("GET", "metadata"): lambda b, p: [json.loads(json.dumps(self.kodi))],
@@ -938,6 +938,8 @@ class Nfo(unittest.TestCase):
             self.asked.append(list(ids))
             return [full_scene(i) for i in ids if i == SCENE]
         self.app.stash.find_many = find_many
+        self.fetched = []  # never StashDB's image server from a test
+        self.app.fetch_image = lambda url: self.fetched.append(url) or (b"JPEG", "image/jpeg")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1005,6 +1007,40 @@ class Nfo(unittest.TestCase):
         self.assertEqual(self.app.db.setting("whisparr_nfo_off"), "0")
         self.app.sync_nfos()  # already back: no more changes
         self.assertEqual(self.puts, [False, True])
+
+    def test_cover_is_folder_jpg(self):
+        folder = self.video.parent
+        (folder / "screenshot.jpg").write_bytes(b"SHOT")  # Whisparr's: a photo of its own in Jellyfin
+        self.app.sync_nfos()
+        self.assertEqual((folder / "folder.jpg").read_bytes(), b"SHOT")
+        self.assertFalse((folder / "screenshot.jpg").exists())
+        self.assertEqual(self.fetched, [])
+
+    def test_cover_from_stashdb(self):
+        self.app.sync_nfos()
+        self.assertEqual((self.video.parent / "folder.jpg").read_bytes(), b"JPEG")
+        self.assertEqual(self.fetched, ["https://cdn.stashdb.org/a?size=1280"])  # the landscape one
+
+    def test_own_cover_and_done_scenes_stay(self):
+        folder = self.video.parent
+        (folder / "folder.png").write_bytes(b"MINE")
+        self.app.sync_nfos()
+        self.assertEqual((folder / "folder.png").read_bytes(), b"MINE")
+        self.assertFalse((folder / "folder.jpg").exists())
+        (folder / "screenshot.jpg").write_bytes(b"SHOT")  # Whisparr made one again: it goes
+        self.asked.clear()
+        self.app.sync_nfos()
+        self.assertFalse((folder / "screenshot.jpg").exists())
+        self.app.sync_nfos()
+        self.assertEqual(len(self.asked), 1)
+
+    def test_whisparr_back_on_with_both(self):
+        self.kodi["fields"][0]["value"] = False  # .nfo off by hand, pictures on
+        self.app.sync_nfos()
+        self.app.db.set_settings({"write_nfo": "0"})
+        self.app.sync_nfos()
+        self.assertTrue(self.kodi["enable"])
+        self.assertEqual([f["value"] for f in self.kodi["fields"]], [True, True])
 
     def test_left_alone_when_whisparr_writes_none(self):
         self.kodi["enable"] = False

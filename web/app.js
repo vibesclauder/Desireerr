@@ -1538,7 +1538,7 @@ async function viewSettings(view, ctx) {
         <label class="field"><span>Address (from this server)</span><input class="input" name="jellyfin_url" value="${s.jellyfin_url}" placeholder="http://localhost:8096"></label>
         <label class="field"><span>API key</span><input class="input" name="jellyfin_key" type="password" autocomplete="off" placeholder="${s.jellyfin_key_set ? "Saved. Paste a new one to replace it." : "Jellyfin: Dashboard, API Keys"}"></label>
         <label class="field" style="grid-column:1/-1"><span>Address for the Watch button (from your browser)</span><input class="input" name="jellyfin_link" value="${s.jellyfin_link}" placeholder="${location.protocol}//${location.hostname}:8096"></label>
-        <label class="check" style="grid-column:1/-1"><input type="checkbox" name="write_nfo" ${s.write_nfo ? "checked" : ""}> Write the downloaded scenes' .nfo files from StashDB: the performers as the cast, with their photos, and the studio, tags and description. Whisparr's own .nfo writing is turned off meanwhile (its pictures stay), and back on without this.</label>
+        <label class="check" style="grid-column:1/-1"><input type="checkbox" name="write_nfo" ${s.write_nfo ? "checked" : ""}> Write the downloaded scenes' .nfo files and covers (folder.jpg) from StashDB: the performers as the cast, with their photos, and the studio, tags and description. Whisparr's own metadata is turned off meanwhile, and back on without this.</label>
         <div class="btns"><button class="btn primary">Save</button>${s.jellyfin_key_set && !s.jellyfin_error ? html`<span class="note ok-text">Connected: Jellyfin has ${s.jellyfin_videos} videos.</span>` : ""}</div>
       </form>
     </section>`);

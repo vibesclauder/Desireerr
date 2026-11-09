@@ -756,18 +756,24 @@ class Whisparr:
             pass
         return self.follow_state(kind, stash_id)
 
-    def set_nfo(self, on):
-        """Whisparr's Kodi (XBMC) / Emby metadata: its .nfo files on or off (its pictures
-        stay). True if it changed anything."""
+    def set_metadata(self, on):
+        """Whisparr's Kodi (XBMC) / Emby metadata (its .nfo and screenshot.jpg) off, or back
+        on with both. True if it changed anything; one that was off stays off."""
         changed = False
         for m in self.call("GET", "metadata") or []:
-            if m.get("implementation") != "XbmcMetadata" or not m.get("enable"):
+            if m.get("implementation") != "XbmcMetadata":
                 continue
-            field = next((f for f in m.get("fields", []) if f.get("name") == "movieMetadata"), None)
-            if field and bool(field.get("value")) != on:
-                field["value"] = on
-                self.call("PUT", f"metadata/{m['id']}", body=m)
-                changed = True
+            fields = [f for f in m.get("fields", []) if f.get("name") in ("movieMetadata", "movieImages")]
+            if not on and m.get("enable"):
+                m["enable"] = False
+            elif on and not (m.get("enable") and all(f.get("value") for f in fields)):
+                m["enable"] = True
+                for f in fields:
+                    f["value"] = True
+            else:
+                continue
+            self.call("PUT", f"metadata/{m['id']}", body=m)
+            changed = True
         return changed
 
     def web_url(self, whisparr_id=None):
@@ -977,7 +983,13 @@ class Jellyfin:
         return hit
 
     def refresh_item(self, item_id):
-        """Jellyfin reads the item's .nfo again, and fetches the cast's photos it names."""
+        """Jellyfin looks at the scene's folder again (its cover; a screenshot.jpg gone), then
+        reads the item's .nfo again and fetches the cast's photos it names."""
+        found = self.call(f"Items?Ids={item_id}&Fields=ParentId") or {}
+        parent = ((found.get("Items") or [{}])[0]).get("ParentId")
+        if parent:
+            self.call(f"Items/{parent}/Refresh?Recursive=true&metadataRefreshMode=Default"
+                      "&imageRefreshMode=Default", method="POST")
         self.call(f"Items/{item_id}/Refresh?metadataRefreshMode=FullRefresh"
                   "&imageRefreshMode=FullRefresh&replaceAllMetadata=true&replaceAllImages=false",
                   method="POST")
@@ -986,8 +998,27 @@ class Jellyfin:
 # ---------------------------------------------------------------------------------------
 # .nfo files for Jellyfin: a downloaded scene's details from StashDB, the performers as its
 # cast with their photos. Whisparr's own lack the photos and list the performers twice (also
-# as writers), so with write_nfo Whisparr's are turned off and ours replace them.
+# as writers), so with write_nfo Whisparr's metadata is turned off and ours replaces it. The
+# cover is folder.jpg: Jellyfin takes it as the folder's and the video's picture, where
+# Whisparr's screenshot.jpg shows up as a photo of its own beside the video.
 # ---------------------------------------------------------------------------------------
+
+COVER_NAMES = ("folder.jpg", "folder.jpeg", "folder.png", "folder.webp")
+COVER_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+
+
+def has_cover(folder):
+    return any(os.path.exists(os.path.join(folder, n)) for n in COVER_NAMES)
+
+
+def scene_cover(scene):
+    """The scene's picture for its cover: its biggest landscape one, as StashDB's cards."""
+    images = scene.get("images") or []
+    if not images:
+        return ""
+    best = max(images, key=lambda i: ((i.get("width") or 0) >= (i.get("height") or 0),
+                                      (i.get("width") or 0) * (i.get("height") or 0)))
+    return best["url"]
 
 def nfo_path(video):
     return os.path.splitext(video)[0] + ".nfo"
@@ -1039,6 +1070,26 @@ def scene_nfo(scene):
             f"<!-- {NFO_MARK} wrote this from StashDB ({STASHDB_WEB}/scenes/{scene.get('id')}) "
             "and rewrites it; edits here don't last. -->\n"
             + ET.tostring(root, encoding="unicode") + "\n")
+
+
+def write_cover(folder, fetch, url):
+    """folder.jpg: Whisparr's screenshot.jpg renamed, or else the scene's picture from StashDB
+    (fetch(url) -> (bytes, content type)). A screenshot.jpg beside a cover goes."""
+    shot = os.path.join(folder, "screenshot.jpg")
+    if not has_cover(folder):
+        if os.path.exists(shot):
+            os.replace(shot, os.path.join(folder, "folder.jpg"))
+        elif url:
+            data, ctype = fetch(url + "?size=1280")
+            ext = COVER_TYPES.get(ctype)
+            if ext:
+                tmp = os.path.join(folder, f"folder.{ext}.desireerr-tmp")
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.chmod(tmp, 0o664)
+                os.replace(tmp, os.path.join(folder, f"folder.{ext}"))
+    if has_cover(folder) and os.path.exists(shot):
+        os.remove(shot)
 
 
 def write_nfo(video, text):
@@ -1958,24 +2009,31 @@ class App:
             self.jellyfin.time = self.jellyfin.tried = 0
         return self.public_settings()
 
+    def fetch_image(self, url):
+        if self.images:
+            return self.images.get(url)
+        raise ApiError(502, "No image cache.")
+
     def sync_nfos(self):
-        """With write_nfo: Whisparr's .nfo writing off, and ours for the downloaded scenes
-        that don't have one yet (NFO_BATCH a round); Jellyfin then reads each again.
+        """With write_nfo: Whisparr's metadata off, and our .nfo and folder.jpg for the
+        downloaded scenes that lack one (NFO_BATCH a round); Jellyfin then reads each again.
         Without it: Whisparr's back on, if we turned it off. Returns how many were written."""
         s = self.db.settings()
         if s["write_nfo"] != "1":
             if s["whisparr_nfo_off"] == "1":
-                self.whisparr.set_nfo(True)
+                self.whisparr.set_metadata(True)
                 self.db.set_settings({"whisparr_nfo_off": "0"})
             return 0
-        if self.whisparr.set_nfo(False):
+        if self.whisparr.set_metadata(False):
             self.db.set_settings({"whisparr_nfo_off": "1"})
         with self.whisparr.lock:
             files = {sid: i["path"] for sid, i in self.whisparr.index.items()
                      if i["has_file"] and i["path"] and i.get("item_type", "scene") == "scene"}
         now = time.time()
         todo = [sid for sid, path in files.items()
-                if not is_ours(nfo_path(path)) and now - self.nfo_missing.get(sid, 0) > NFO_RETRY]
+                if not (is_ours(nfo_path(path)) and has_cover(os.path.dirname(path))
+                        and not os.path.exists(os.path.join(os.path.dirname(path), "screenshot.jpg")))
+                and now - self.nfo_missing.get(sid, 0) > NFO_RETRY]
         batch = todo[:NFO_BATCH]
         scenes = self.stash.find_many("findScene", batch, "{ ...SceneFull }", SCENE_FULL,
                                       ttl=0) if batch else []
@@ -1991,6 +2049,10 @@ class App:
             try:
                 write_nfo(path, scene_nfo(scene))
                 written.append(path)
+                with contextlib.suppress(ApiError):
+                    write_cover(os.path.dirname(path), self.fetch_image, scene_cover(scene))
+                if not has_cover(os.path.dirname(path)):  # no picture: tried again later
+                    self.nfo_missing[scene["id"]] = now
             except OSError as e:
                 if e.errno == errno.EROFS:  # the service's sandbox: see README, Jellyfin
                     self.nfo_error = (f"{os.path.dirname(path)} is read-only for Desireerr; its "
