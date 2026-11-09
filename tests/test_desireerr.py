@@ -901,5 +901,119 @@ class FavouriteTags(Base):
         self.assertEqual(self.app.db.one("SELECT cursor FROM watches")["cursor"], "")
 
 
+def full_scene(sid=SCENE):
+    return {**scene(sid), "details": "What happens & more", "duration": 3725, "director": "Dir",
+            "tags": [{"id": "t1", "name": "Hotel"}, {"id": "t2", "name": "Interview"}],
+            "performers": [
+                {"as": None, "performer": {"id": "p1", "name": "Ann", "images": [
+                    {"url": "https://stashdb.org/images/ann1"}, {"url": "https://stashdb.org/images/ann2"}]}},
+                {"as": "Bob B.", "performer": {"id": "p2", "name": "Bob", "images": []}}]}
+
+
+class Nfo(unittest.TestCase):
+    """The downloaded scenes' .nfo files, written from StashDB in place of Whisparr's."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.kodi = {"id": 3, "implementation": "XbmcMetadata", "enable": True,
+                     "fields": [{"name": "movieMetadata", "value": True}, {"name": "movieImages", "value": True}]}
+        self.puts = []
+
+        def put(body, params):
+            self.puts.append(body["fields"][0]["value"])
+            self.kodi = json.loads(json.dumps(body))
+            return body
+        self.app = make_app(self.tmp.name, {("GET", "metadata"): lambda b, p: [json.loads(json.dumps(self.kodi))],
+                                            ("PUT", "metadata/3"): put})
+        self.lib = Path(self.tmp.name) / "lib"
+        self.video = self.lib / "Studio" / "2026-11-01 - A scene [x]" / "A.Scene.1080p.mp4"
+        self.video.parent.mkdir(parents=True)
+        self.video.write_bytes(b"")
+        self.app.whisparr.index = {
+            SCENE: {"id": 1, "has_file": True, "path": str(self.video), "item_type": "scene"},
+            OTHER: {"id": 2, "has_file": False, "path": "", "item_type": "scene"}}
+        self.asked = []
+
+        def find_many(field, ids, selection, fragments="", ttl=300):
+            self.asked.append(list(ids))
+            return [full_scene(i) for i in ids if i == SCENE]
+        self.app.stash.find_many = find_many
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_nfo(self):
+        text = d.scene_nfo(full_scene())
+        self.assertIn("<!-- Desireerr wrote this from StashDB", text)
+        root = d.ET.fromstring(text.split("\n", 2)[2])
+        self.assertEqual(root.findtext("title"), "A scene")
+        self.assertEqual(root.findtext("plot"), "What happens & more")
+        self.assertEqual((root.findtext("premiered"), root.findtext("year")), ("2026-11-01", "2026"))
+        self.assertEqual(root.findtext("runtime"), "62")
+        self.assertEqual(root.findtext("studio"), "Studio")
+        self.assertEqual([g.text for g in root.findall("genre")], ["Hotel", "Interview"])
+        self.assertEqual(root.find("uniqueid").attrib, {"type": "stashdb", "default": "true"})
+        self.assertIsNone(root.find("credits"))  # Jellyfin would list them as writers too
+        actors = root.findall("actor")
+        self.assertEqual([a.findtext("name") for a in actors], ["Ann", "Bob"])
+        self.assertEqual(actors[0].findtext("thumb"), "https://stashdb.org/images/ann1?size=600")
+        self.assertIsNone(actors[1].find("thumb"))
+        self.assertEqual(actors[1].findtext("role"), "Bob B.")
+
+    def test_written_once_and_whisparr_off(self):
+        nfo = self.video.with_suffix(".nfo")
+        nfo.write_text("<movie><title>Whisparr's</title><credits>Ann</credits></movie>")
+        self.assertEqual(self.app.sync_nfos(), 1)
+        self.assertIn("<thumb>https://stashdb.org/images/ann1?size=600</thumb>", nfo.read_text())
+        self.assertEqual(self.puts, [False])
+        self.assertEqual(self.app.db.setting("whisparr_nfo_off"), "1")
+        self.assertEqual(self.asked, [[SCENE]])  # nothing for the scene without a file
+        self.assertEqual(self.app.sync_nfos(), 0)  # ours already: StashDB isn't asked again
+        self.assertEqual((self.asked, self.puts), ([[SCENE]], [False]))
+
+    def test_an_upgrade_leaves_no_old_nfo(self):
+        old = self.video.with_name("A.Scene.720p.nfo")
+        old.write_text(d.scene_nfo(full_scene()))
+        keep = self.video.with_name("notes.nfo")      # not ours: stays
+        keep.write_text("<x/>")
+        self.app.sync_nfos()
+        self.assertTrue(self.video.with_suffix(".nfo").exists())
+        self.assertFalse(old.exists())
+        self.assertTrue(keep.exists())
+
+    def test_a_scene_stashdb_lacks_waits(self):
+        self.app.whisparr.index[OTHER] = {"id": 2, "has_file": True, "item_type": "scene",
+                                          "path": str(self.video.with_name("Other.mp4"))}
+        self.app.sync_nfos()
+        self.app.sync_nfos()
+        self.assertEqual([sorted(a) for a in self.asked], [sorted([SCENE, OTHER])])
+        self.assertIn(OTHER, self.app.nfo_missing)
+
+    def test_jellyfin_reads_it_again(self):
+        self.app.db.set_settings({"jellyfin_key": "jk"})
+        refreshed = []
+        self.app.jellyfin.find = lambda path: "item1" if path == str(self.video) else None
+        self.app.jellyfin.refresh_item = refreshed.append
+        self.app.sync_nfos()
+        self.assertEqual(refreshed, ["item1"])
+
+    def test_off_gives_whisparr_its_nfo_back(self):
+        self.app.sync_nfos()
+        self.app.db.set_settings({"write_nfo": "0"})
+        self.assertEqual(self.app.sync_nfos(), 0)
+        self.assertEqual(self.puts, [False, True])
+        self.assertEqual(self.app.db.setting("whisparr_nfo_off"), "0")
+        self.app.sync_nfos()  # already back: no more changes
+        self.assertEqual(self.puts, [False, True])
+
+    def test_left_alone_when_whisparr_writes_none(self):
+        self.kodi["enable"] = False
+        self.app.sync_nfos()
+        self.assertEqual(self.puts, [])
+        self.app.db.set_settings({"write_nfo": "0"})
+        self.app.sync_nfos()
+        self.assertEqual(self.puts, [])  # we didn't turn it off, so we don't turn it on
+
+
 if __name__ == "__main__":
     unittest.main()

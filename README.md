@@ -135,6 +135,30 @@ scenes get a **Watch** button on their page and in Requests. It finds the scene 
 by its file (Whisparr's path, or the file name if the two see different folders) and opens
 it at Jellyfin's address: the one in Settings, or the host Desireerr is opened at, port 8096.
 
+### Scene details in Jellyfin (.nfo files)
+
+Desireerr also writes each downloaded scene's `.nfo` file beside the video (Settings,
+Jellyfin, on by default): title, description, date, studio, StashDB's tags as genres, and
+the performers as the cast, each with their StashDB photo, which Jellyfin shows on the cast
+cards. Whisparr's own `.nfo` lists the performers without photos, and twice (Jellyfin shows
+them as writers too), so Desireerr turns Whisparr's off (Settings → Metadata → Kodi (XBMC) /
+Emby, "Movie Metadata"; its pictures stay) and back on when you untick this.
+
+It checks every couple of minutes, writes up to 50 at a time (the ones a scene doesn't have
+yet), and with a Jellyfin API key has Jellyfin read each one again right away; new downloads
+are read on Jellyfin's next scan. A file with Desireerr's comment at the top is rewritten
+when needed, so edit the details on StashDB, not in the file.
+
+The service's sandbox is read-only outside its own folders, so it needs Whisparr's root
+folders writable. torrent-box's setup adds that; by hand, a drop-in with your root folders:
+
+```sh
+mkdir -p ~/.config/systemd/user/desireerr.service.d
+printf '[Service]\nReadWritePaths=-/path/to/whisparr/root\n' \
+    > ~/.config/systemd/user/desireerr.service.d/storage.conf
+systemctl --user daemon-reload && systemctl --user restart desireerr
+```
+
 ## Files
 
 | Path | What |

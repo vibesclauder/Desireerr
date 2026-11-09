@@ -16,6 +16,7 @@ import argparse
 import base64
 import configparser
 import contextlib
+import errno
 import hashlib
 import hmac
 import json
@@ -64,6 +65,9 @@ WATCH_MAX_REQUESTS = 25      # requests one check makes at most; the rest wait f
 WATCH_RETRY_DAYS = 14        # how long a scene Whisparr doesn't know yet is tried again
 AVAILABLE_WINDOW = 2 * 86400  # "now available" only for files this new (not a backlog)
 JELLYFIN_MAX_AGE = 600       # seconds between Jellyfin library refreshes
+NFO_BATCH = 50               # .nfo files written per background round at most
+NFO_RETRY = 86400            # a scene StashDB didn't have is tried again after this long
+NFO_MARK = "Desireerr"       # in the comment at the top of the .nfo files we write
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -82,6 +86,8 @@ DEFAULT_SETTINGS = {
     "jellyfin_url": DEFAULT_JELLYFIN,
     "jellyfin_key": "",
     "jellyfin_link": "",         # Jellyfin's address for the browser; empty: our host, :8096
+    "write_nfo": "1",            # downloaded scenes' .nfo from StashDB, not from Whisparr
+    "whisparr_nfo_off": "0",     # we turned Whisparr's .nfo writing off (and turn it back on)
 }
 
 
@@ -750,6 +756,20 @@ class Whisparr:
             pass
         return self.follow_state(kind, stash_id)
 
+    def set_nfo(self, on):
+        """Whisparr's Kodi (XBMC) / Emby metadata: its .nfo files on or off (its pictures
+        stay). True if it changed anything."""
+        changed = False
+        for m in self.call("GET", "metadata") or []:
+            if m.get("implementation") != "XbmcMetadata" or not m.get("enable"):
+                continue
+            field = next((f for f in m.get("fields", []) if f.get("name") == "movieMetadata"), None)
+            if field and bool(field.get("value")) != on:
+                field["value"] = on
+                self.call("PUT", f"metadata/{m['id']}", body=m)
+                changed = True
+        return changed
+
     def web_url(self, whisparr_id=None):
         url, _ = self.creds()
         return f"{url}/movie/{whisparr_id}" if whisparr_id else url
@@ -904,13 +924,15 @@ class Jellyfin:
         s = self.db.settings()
         return (s.get("jellyfin_url") or DEFAULT_JELLYFIN).rstrip("/"), s.get("jellyfin_key", "")
 
-    def call(self, path, timeout=20):
+    def call(self, path, timeout=20, method="GET"):
         url, key = self.creds()
-        req = urllib.request.Request(f"{url}/{path}", headers={
+        req = urllib.request.Request(f"{url}/{path}", method=method,
+                                     data=b"" if method == "POST" else None, headers={
             "Authorization": f'MediaBrowser Token="{key}"', "User-Agent": USER_AGENT})
         try:
             with timed("jellyfin"), urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.load(resp)
+                raw = resp.read()
+            return json.loads(raw) if raw.strip() else None
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 raise ApiError(502, "Jellyfin refused the API key. Check it in Settings.")
@@ -953,6 +975,89 @@ class Jellyfin:
             with self.lock:
                 hit = self.paths.get(path) or self.names.get(os.path.basename(path))
         return hit
+
+    def refresh_item(self, item_id):
+        """Jellyfin reads the item's .nfo again, and fetches the cast's photos it names."""
+        self.call(f"Items/{item_id}/Refresh?metadataRefreshMode=FullRefresh"
+                  "&imageRefreshMode=FullRefresh&replaceAllMetadata=true&replaceAllImages=false",
+                  method="POST")
+
+
+# ---------------------------------------------------------------------------------------
+# .nfo files for Jellyfin: a downloaded scene's details from StashDB, the performers as its
+# cast with their photos. Whisparr's own lack the photos and list the performers twice (also
+# as writers), so with write_nfo Whisparr's are turned off and ours replace them.
+# ---------------------------------------------------------------------------------------
+
+def nfo_path(video):
+    return os.path.splitext(video)[0] + ".nfo"
+
+
+def is_ours(nfo):
+    try:
+        with open(nfo, encoding="utf-8", errors="replace") as f:
+            return f"<!-- {NFO_MARK}" in f.read(400)
+    except OSError:
+        return False
+
+
+def scene_nfo(scene):
+    """The .nfo Kodi and Jellyfin read for a movie, for a StashDB scene."""
+    root = ET.Element("movie")
+
+    def add(tag, text, **attrs):
+        if text not in (None, ""):
+            ET.SubElement(root, tag, attrs).text = str(text)
+
+    add("title", scene.get("title") or "Untitled")
+    add("plot", scene.get("details"))
+    released = scene.get("release_date") or ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", released):
+        add("premiered", released)
+    add("year", released[:4] if re.match(r"\d{4}", released) else "")
+    if scene.get("duration"):
+        add("runtime", round(scene["duration"] / 60))
+    add("studio", (scene.get("studio") or {}).get("name"))
+    add("director", scene.get("director"))
+    for tag in scene.get("tags") or []:
+        add("genre", tag.get("name"))
+    add("uniqueid", scene.get("id"), type="stashdb", default="true")
+    for order, appearance in enumerate(scene.get("performers") or []):
+        performer = appearance.get("performer") or {}
+        if not performer.get("name"):
+            continue
+        actor = ET.SubElement(root, "actor")
+        ET.SubElement(actor, "name").text = performer["name"]
+        if appearance.get("as"):
+            ET.SubElement(actor, "role").text = appearance["as"]
+        images = performer.get("images") or []
+        if images:  # StashDB lists a performer's main photo first
+            ET.SubElement(actor, "thumb").text = images[0]["url"] + "?size=600"
+        ET.SubElement(actor, "order").text = str(order)
+    ET.indent(root)
+    return ('<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
+            f"<!-- {NFO_MARK} wrote this from StashDB ({STASHDB_WEB}/scenes/{scene.get('id')}) "
+            "and rewrites it; edits here don't last. -->\n"
+            + ET.tostring(root, encoding="unicode") + "\n")
+
+
+def write_nfo(video, text):
+    """Write the .nfo beside the video (atomically). Ours left from the scene's earlier file,
+    e.g. before an upgrade, go."""
+    nfo = nfo_path(video)
+    tmp = f"{nfo}.desireerr-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, 0o664)
+    os.replace(tmp, nfo)
+    folder = os.path.dirname(video)
+    with contextlib.suppress(OSError):
+        for name in os.listdir(folder):
+            other = os.path.join(folder, name)
+            if name.endswith(".nfo") and other != nfo and is_ours(other):
+                stem = os.path.splitext(name)[0]
+                if not any(n != name and os.path.splitext(n)[0] == stem for n in os.listdir(folder)):
+                    os.remove(other)
 
 
 # ---------------------------------------------------------------------------------------
@@ -1049,6 +1154,8 @@ class App:
         self.jellyfin = Jellyfin(self.db)
         self.images = Images(cache_dir) if cache_dir else None
         self.watch_lock = threading.Lock()
+        self.nfo_missing = {}    # scene id -> when StashDB didn't have it
+        self.nfo_error = ""
         self.failures = {}       # ip -> (count, last time), for login throttling
         self.setup_code = self.load_setup_code() if setup_code else ""
 
@@ -1782,6 +1889,8 @@ class App:
             "jellyfin_url": s["jellyfin_url"],
             "jellyfin_key_set": bool(s["jellyfin_key"]),
             "jellyfin_link": s["jellyfin_link"],
+            "write_nfo": s["write_nfo"] == "1",
+            "nfo_error": self.nfo_error,
         }
         tb_server, tb_topic = torrent_box_ntfy(self.notify.conf_dir)
         out["torrent_box_ntfy"] = tb_server if tb_topic else ""
@@ -1839,6 +1948,8 @@ class App:
             allowed["notify_discreet"] = "1" if body["notify_discreet"] else "0"
         if "jellyfin_key" in body and body["jellyfin_key"] is not None:
             allowed["jellyfin_key"] = str(body["jellyfin_key"]).strip()
+        if "write_nfo" in body:
+            allowed["write_nfo"] = "1" if body["write_nfo"] else "0"
         self.db.set_settings(allowed)
         if {"whisparr_url", "whisparr_key"} & allowed.keys():
             self.whisparr.index_time = 0
@@ -1846,6 +1957,57 @@ class App:
         if {"jellyfin_url", "jellyfin_key"} & allowed.keys():
             self.jellyfin.time = self.jellyfin.tried = 0
         return self.public_settings()
+
+    def sync_nfos(self):
+        """With write_nfo: Whisparr's .nfo writing off, and ours for the downloaded scenes
+        that don't have one yet (NFO_BATCH a round); Jellyfin then reads each again.
+        Without it: Whisparr's back on, if we turned it off. Returns how many were written."""
+        s = self.db.settings()
+        if s["write_nfo"] != "1":
+            if s["whisparr_nfo_off"] == "1":
+                self.whisparr.set_nfo(True)
+                self.db.set_settings({"whisparr_nfo_off": "0"})
+            return 0
+        if self.whisparr.set_nfo(False):
+            self.db.set_settings({"whisparr_nfo_off": "1"})
+        with self.whisparr.lock:
+            files = {sid: i["path"] for sid, i in self.whisparr.index.items()
+                     if i["has_file"] and i["path"] and i.get("item_type", "scene") == "scene"}
+        now = time.time()
+        todo = [sid for sid, path in files.items()
+                if not is_ours(nfo_path(path)) and now - self.nfo_missing.get(sid, 0) > NFO_RETRY]
+        batch = todo[:NFO_BATCH]
+        scenes = self.stash.find_many("findScene", batch, "{ ...SceneFull }", SCENE_FULL,
+                                      ttl=0) if batch else []
+        found = {sc["id"] for sc in scenes}
+        for sid in batch:
+            if sid not in found:  # StashDB doesn't have it (any more)
+                self.nfo_missing[sid] = now
+        written, errors = [], []
+        for scene in scenes:
+            path = files.get(scene["id"])
+            if not path:
+                continue
+            try:
+                write_nfo(path, scene_nfo(scene))
+                written.append(path)
+            except OSError as e:
+                if e.errno == errno.EROFS:  # the service's sandbox: see README, Jellyfin
+                    self.nfo_error = (f"{os.path.dirname(path)} is read-only for Desireerr; its "
+                                      "service needs ReadWritePaths= for Whisparr's root folders")
+                    print(f"nfo: {self.nfo_error}", file=sys.stderr, flush=True)
+                    return len(written)
+                errors.append(f"{nfo_path(path)}: {e.strerror or e}")
+        self.nfo_error = "; ".join(errors[:3]) + (f" (and {len(errors) - 3} more)" if len(errors) > 3 else "")
+        if self.nfo_error:
+            print(f"nfo: {self.nfo_error}", file=sys.stderr, flush=True)
+        if written and self.jellyfin.creds()[1]:
+            for path in written:
+                item = self.jellyfin.find(path)
+                if item:  # not yet in Jellyfin: its next scan reads the .nfo anyway
+                    with contextlib.suppress(ApiError):
+                        self.jellyfin.refresh_item(item)
+        return len(written)
 
     def remember_origin(self, origin):
         """Where the app is opened, for links in pushes while no address is set."""
@@ -2284,6 +2446,13 @@ def refresher(app):
             app.whisparr.error = e.message
         except Exception as e:
             print(f"refresh failed: {e!r}", file=sys.stderr, flush=True)
+        try:
+            app.sync_nfos()
+        except ApiError as e:
+            app.nfo_error = e.message
+            print(f"nfo: {e.message}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"nfo failed: {e!r}", file=sys.stderr, flush=True)
         try:
             app.check_watches()
         except ApiError as e:
