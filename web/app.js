@@ -742,7 +742,9 @@ const SORTS = [
   ["TITLE:asc", "Title A to Z"],
 ];
 
-async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {}, hide = [] } = {}) {
+// onFilters(words, f): told what the filters match, in words (and the filters themselves), at
+// the start and on every change.
+async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {}, hide = [], onFilters = null } = {}) {
   const params = new URLSearchParams(location.search);
   const f = {
     q: params.get("q") || "",
@@ -823,6 +825,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     }).replace("tags=-", "tags=");
     history.replaceState(null, "", url);
     setFilterCount(el, activeCount());
+    onFilters?.(describe(), f);
     load(true);
   };
 
@@ -855,7 +858,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     const studios = fixedNames.studios || labels.studios;
     const parts = [];
     if (labels.tags.length) parts.push(nm(labels.tags).join(f.tag_mode === "any" ? " or " : " + "));
-    if (f.fav_tags) parts.push("my favourite tags");
+    if (f.fav_tags) parts.push("tags I love or like");
     if (perf.length) parts.push(nm(perf).join(" & "));
     if (studios.length) parts.push(nm(studios).join(" or ") + (fixed.studios && f.sub_studios ? " (with sub-studios)" : ""));
     if (f.favorites) parts.push({ ALL: "StashDB favourites", PERFORMER: "Favourite performers", STUDIO: "Favourite studios" }[f.favorites]);
@@ -863,6 +866,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     if (labels.not_tags.length) parts.push("not " + nm(labels.not_tags).join(", "));
     return parts.join(" · ");
   };
+  onFilters?.(describe(), f);
   const watchQuery = () => qs(Object.fromEntries(Object.entries({
     q: f.q, tags: f.tags, tag_mode: f.tags.length > 1 && f.tag_mode !== "all" ? f.tag_mode : "", not_tags: f.not_tags, fav_tags: f.fav_tags,
     performers: performers(), performer_mode: performers().length > 1 ? "all" : "",
@@ -1319,21 +1323,35 @@ async function viewStudio(view, id, ctx) {
   await sceneBrowser($("#browser", view), ctx, { fixed: { studios: [id] }, fixedNames: { studios: [{ id, name: s.name }] }, defaults: { sub_studios: s.child_studios?.length ? "1" : "" }, hide: ["studios"] });
 }
 
+// A tag's page: the tag, and its scenes. Once the filters are more (or other) than the tag,
+// the heading says what they match instead, with the way back to just the tag.
 async function viewTag(view, id, ctx) {
   const t = await api("tag/" + id);
   if (!ctx.alive()) return;
   document.title = t.name;
   view.innerHTML = html`<div class="page">
-    <div class="section" style="gap:8px">
+    <div class="section" style="gap:8px" id="tag-head">
       <div class="page-title"><h1>${t.name}</h1>${t.category ? html`<a class="chip" href="/tags#cat-${t.category.id}">${t.category.name}</a>` : ""}
         <div class="seg feelings" role="group" aria-label="How you feel about this tag">${FEELINGS.map(([k, label, ic]) => html`<button type="button" class="${k === t.feeling ? `on feel-${k}` : ""}" data-act="feeling" data-id="${t.id}" data-feeling="${k}" aria-pressed="${k === t.feeling}">${ic ? icon(ic) : ""}${label}</button>`)}</div></div>
       ${t.description ? html`<p class="prose" style="margin:0">${t.description}</p>` : ""}
       ${t.aliases?.length ? html`<div class="note">Also called: ${t.aliases.join(", ")}</div>` : ""}
       <div class="note">Add more tags below to narrow it down, or leave some out.</div>
     </div>
+    <div class="section" style="gap:8px" id="filter-head" hidden>
+      <div class="page-title"><h1></h1></div>
+      <div class="note">Scenes that match the filters below. <a href="/tag/${t.id}"><u>Back to just ${t.name}</u></a>, or keep them with Save search (under Filters).</div>
+    </div>
     <div class="section" id="browser"></div>
   </div>`.s;
-  await sceneBrowser($("#browser", view), ctx, { defaults: { tags: id, sort: "TRENDING", dir: "desc" } });
+  const tagHead = $("#tag-head", view), filterHead = $("#filter-head", view);
+  const onFilters = (words, f) => {
+    const just = f.tags.length === 1 && f.tags[0] === t.id && !(f.q || f.not_tags.length || f.fav_tags || f.performers.length || f.studios.length || f.favorites);
+    tagHead.hidden = !just;
+    filterHead.hidden = just;
+    $("h1", filterHead).textContent = words || "All scenes";
+    document.title = just ? t.name : words || "Scenes";
+  };
+  await sceneBrowser($("#browser", view), ctx, { defaults: { tags: id, sort: "TRENDING", dir: "desc" }, onFilters });
 }
 
 async function viewTags(view, ctx) {
