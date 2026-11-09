@@ -1136,12 +1136,17 @@ async function viewScene(view, id, ctx) {
   similarScenes($("#similar", view), id, ctx);
 }
 
-// The reel under a scene: same women, same kind of action. Loaded after the page, which is
-// complete without it.
+// The reels under a scene (with favourite performers, Discover, Together again; see
+// App.similar). Loaded
+// after the page, which is complete without them.
 async function similarScenes(el, id, ctx) {
   let r;
   try { r = await api(`scene/${id}/similar`); } catch { return; }
-  if (ctx.alive() && r.scenes.length) el.outerHTML = slider("Similar scenes", r.scenes, "scenes", null, sceneCard).s;
+  if (!ctx.alive() || !r.rows.length) return;
+  el.outerHTML = r.rows.map((row) => html`<section class="section">
+    <div class="section-head"><h2>${row.title}</h2>${row.sub ? html`<span class="sub">${row.sub}</span>` : ""}</div>
+    <div class="slider scenes">${row.scenes.map(sceneCard)}</div>
+  </section>`.s).join("");
 }
 
 function favoriteButton(kind, item) {

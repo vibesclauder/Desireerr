@@ -381,70 +381,103 @@ class Favourites(unittest.TestCase):
 
 
 class Similar(unittest.TestCase):
-    W1, W2, M1 = "aaaaaaaa-0000-0000-0000-00000000000" + "1", "aaaaaaaa-0000-0000-0000-000000000002", "bbbbbbbb-0000-0000-0000-000000000001"
-    A, B, C = "cccccccc-0000-0000-0000-00000000000a", "cccccccc-0000-0000-0000-00000000000b", "cccccccc-0000-0000-0000-00000000000c"
-    X, Y, Z = "dddddddd-0000-0000-0000-00000000000" + "1", "dddddddd-0000-0000-0000-000000000002", "dddddddd-0000-0000-0000-000000000003"
+    """The reels under a scene: Inner circle, Discover, Together again."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app = make_app(self.tmp.name)
-        self.stash = self.app.stash
-        self.stash.tags = {}
+        stash = self.app.stash
+        sc = scene()
+        sc["performers"] = [{"as": None, "performer": {"id": p}} for p in ("w1", "w2", "m1")]
+        sc["tags"] = [{"id": "A", "category": {"group": "ACTION"}},
+                      {"id": "B", "category": {"group": "SCENE"}},
+                      {"id": "C", "category": {"group": "PEOPLE"}}]
+        stash.scenes[SCENE] = sc
+        stash.tags = {}
+        self.inner, self.outer, self.pairs, self.queries = [], [], {}, []
+        self.favs = ["w1"]                                       # StashDB favourites
+        self.app.whisparr.followed = {"performers": [{"id": "f2"}], "studios": []}  # followed
+        self.app.fav_tag_ids = lambda user: ["A", "D"] if user else []
+
+        def query_scenes(inp, ttl=300):
+            self.queries.append(inp)
+            if inp.get("fail"):
+                raise d.ApiError(502, "StashDB is down")
+            return {"count": 0, "scenes": self.inner if "performers" in inp else self.outer}
+        stash.query_scenes = query_scenes
+        stash.query_performers = lambda inp: {"count": len(self.favs),
+                                              "performers": [{"id": i} for i in self.favs]}
+        stash.query_scenes_many = lambda inputs, ttl=300: [
+            self.pairs.get(tuple(i["performers"]["value"]), []) for i in inputs]
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def card(self, sid, *people):
-        return {"id": sid, "title": sid, "performers": [{"as": None, "performer": {"id": p}} for p in people]}
+    def card(self, sid, *people, date=""):
+        return {"id": sid, "title": sid, "release_date": date,
+                "performers": [{"as": None, "performer": {"id": p}} for p in people]}
 
-    def cast(self, *people):
-        sc = scene()
-        sc["performers"] = [{"as": None, "performer": {"id": p, "gender": g}} for p, g in people]
-        sc["tags"] = [{"id": self.A, "category": {"group": "ACTION"}},
-                      {"id": self.B, "category": {"group": "SCENE"}},
-                      {"id": self.C, "category": {"group": "PEOPLE"}}]
-        self.stash.scenes[SCENE] = sc
+    def rows(self, user={"id": 1}):
+        return {r["key"]: [sc["id"] for sc in r["scenes"]] for r in self.app.similar(SCENE, user)["rows"]}
 
-    def test_same_women_first_then_most_tags_in_common(self):
-        self.cast((self.W1, "FEMALE"), (self.M1, "MALE"))
-        self.stash.listed = [self.card(self.Y, self.M1), self.card(SCENE, self.W1, self.M1),
-                             self.card(self.Z), self.card(self.X, self.W1)]
-        self.stash.tags = {self.X: [self.A], self.Z: [self.A, self.B, self.C]}
-        got = [sc["id"] for sc in self.app.similar(SCENE)["scenes"]]
-        self.assertEqual(got, [self.X, self.Z, self.Y])  # the man alone counts for nothing
-        self.assertEqual(self.stash.queries[0]["performers"], {"value": [self.W1], "modifier": "INCLUDES"})
-        self.assertEqual(self.stash.queries[1]["tags"], {"value": [self.A, self.B], "modifier": "INCLUDES_ALL"})
-        self.assertEqual(len(self.stash.queries), 2)
+    def test_inner_circle_favourite_performers_first(self):
+        self.inner = [self.card("x1", "w1"), self.card("x2", "w1", "f2"), self.card("x3", "f2"),
+                      self.card(SCENE, "w1"), self.card("x4", "w2")]  # x4: no favourite after all
+        self.app.stash.tags = {"x1": ["A"], "x3": ["B", "C", "D"]}
+        # x2: two favourites 20; x1: one, and A (matching favourite tag) 15; x3: 10 + 1 + 1 + 2
+        self.assertEqual(self.rows()["inner"], ["x2", "x1", "x3"])
+        inner = [q for q in self.queries if "performers" in q]
+        self.assertEqual(inner[0]["performers"], {"value": ["f2", "w1"], "modifier": "INCLUDES"})
+        self.assertEqual(inner[0]["tags"], {"value": ["A", "B"], "modifier": "INCLUDES_ALL"})  # C: looks
+        self.assertEqual(inner[-1].get("tags"), None)  # too few with the tags: any of theirs
 
-    def test_favourite_tags_weigh_more(self):
-        self.cast((self.W1, "FEMALE"))
-        user = {"id": 1}
-        self.app.fav_tag_ids = lambda u: [self.B] if u else []
-        self.stash.listed = [self.card(self.X), self.card(self.Y), self.card(self.Z)]
-        self.stash.tags = {self.X: [self.A, self.C], self.Y: [self.B], self.Z: [self.B, self.A]}
-        got = [sc["id"] for sc in self.app.similar(SCENE, user)["scenes"]]
-        self.assertEqual(got, [self.Z, self.Y, self.X])  # 4, 3, 2
-        self.assertEqual([sc["id"] for sc in self.app.similar(SCENE)["scenes"]], [self.X, self.Z, self.Y])
-        self.assertEqual(self.stash.queries[1]["tags"]["value"], [self.B, self.A])  # favourite first
+    def test_discover_leaves_favourites_out_and_goes_by_tags(self):
+        self.outer = [self.card("y1", "w1"), self.card("y2", "w2"), self.card("y3"), self.card("y4"),
+                      self.card("y5", "f2")]
+        self.app.stash.tags = {"y1": ["A"], "y2": ["B"], "y3": ["A"], "y4": ["D"]}
+        self.assertEqual(self.rows()["discover"], ["y3", "y4", "y2"])  # 5, 2, 1
+        self.assertEqual(self.queries[-1]["tags"]["value"], ["A"])  # fewer tags, favourite first
 
-    def test_without_women_everyone_counts(self):
-        self.cast((self.M1, "MALE"))
-        self.stash.listed = [self.card(self.Z), self.card(self.Y, self.M1)]
-        self.assertEqual([sc["id"] for sc in self.app.similar(SCENE)["scenes"]], [self.Y, self.Z])
+    def test_favourite_tags_count_only_for_the_user(self):
+        self.outer = [self.card("y2", "w2"), self.card("y3"), self.card("y4")]
+        self.app.stash.tags = {"y2": ["B", "C"], "y3": ["A"], "y4": ["D"]}
+        self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4"])  # 2, 1, 0
+
+    def test_together_again_most_of_the_cast_then_newest(self):
+        self.pairs = {("w1", "w2"): [self.card("t1", "w1", "w2", date="2020-01-01"),
+                                      self.card(SCENE, "w1", "w2")],
+                      ("w1", "m1"): [self.card("t2", "w1", "w2", "m1", date="2018-01-01"),
+                                     self.card("t3", "w1", "m1", date="2022-01-01")],
+                      ("w2", "m1"): [self.card("t2", "w1", "w2", "m1", date="2018-01-01")]}
+        self.inner = [self.card("t1", "w1", "w2"), self.card("x1", "w1")]
+        rows = self.rows()
+        self.assertEqual(rows["together"], ["t2", "t3", "t1"])
+        self.assertEqual(rows["inner"], ["x1"])  # t1 is in Together again
+        self.assertEqual(list(rows), ["inner", "together"])  # empty rows left out
+
+    def test_without_favourites_or_tags(self):
+        self.favs, self.app.whisparr.followed = [], {"performers": [], "studios": []}
+        self.outer = [self.card("y2", "w2")]
+        self.assertEqual(self.rows(), {"discover": ["y2"]})
+        self.assertTrue(all("performers" not in q for q in self.queries))
+        self.app.stash.scenes[SCENE]["tags"] = []
+        self.assertEqual(self.rows(), {})
 
     def test_stashdb_trouble_leaves_the_rest(self):
-        self.cast((self.W1, "FEMALE"))
-        self.stash.listed = [self.card(self.X, self.W1)]
-        queries = self.stash.query_scenes
+        self.inner = [self.card("x1", "w1")]
+        queries = self.app.stash.query_scenes
 
         def flaky(inp, ttl=300):
-            if "tags" in inp:
-                raise d.ApiError(502, "StashDB is down")
-            return queries(inp, ttl)
-        self.stash.query_scenes = flaky
-        self.assertEqual([sc["id"] for sc in self.app.similar(SCENE)["scenes"]], [self.X])
+            return queries(dict(inp, fail="performers" not in inp), ttl)
+        self.app.stash.query_scenes = flaky
+
+        def down(*a, **k):
+            raise d.ApiError(502, "StashDB is down")
+        self.app.stash.query_scenes_many = down
+        self.app.stash.find_many = down
+        self.assertEqual(self.rows(), {"inner": ["x1"]})
         with self.assertRaises(d.ApiError):
-            self.app.similar(OTHER[:-1] + "0")
+            self.app.similar("nope")
 
 
 class Images(unittest.TestCase):

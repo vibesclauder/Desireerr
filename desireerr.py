@@ -18,6 +18,7 @@ import configparser
 import contextlib
 import errno
 import hashlib
+import itertools
 import hmac
 import json
 import mimetypes
@@ -68,12 +69,12 @@ JELLYFIN_MAX_AGE = 600       # seconds between Jellyfin library refreshes
 NFO_BATCH = 50               # .nfo files written per background round at most
 NFO_RETRY = 86400            # a scene StashDB didn't have is tried again after this long
 NFO_MARK = "Desireerr"       # in the comment at the top of the .nfo files we write
-SIMILAR_MAX = 24             # scenes in a scene page's "Similar scenes" reel
-SIMILAR_FETCH = 30           # candidates per StashDB query for it
-SIMILAR_PERFORMER = 3        # a shared performer weighs as much as this many shared tags
-SIMILAR_FAV_TAG = 3          # so does a shared tag that's one of the user's favourites
+SIMILAR_MAX = 24             # scenes per reel under a scene (see App.similar)
+SIMILAR_FETCH = 30           # candidates per StashDB query for them
+SIMILAR_FAV_PERFORMER = 10   # a favourite performer weighs as much as ten matching tags
+SIMILAR_FAVS = 200           # favourite performers asked about at most
+SIMILAR_CAST = 6             # Together again: pairs from this much of the cast (15 pairs)
 SIMILAR_TTL = 3600
-WOMEN = {"FEMALE", "TRANSGENDER_FEMALE"}
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -417,6 +418,17 @@ query ($input: SceneQueryInput!) {
   queryScenes(input: $input) { count scenes { ...SceneCard } }
 }"""
         return self.query(q, {"input": scene_input}, ttl)["queryScenes"]
+
+    def query_scenes_many(self, inputs, ttl=300):
+        """Several scene queries in one request, aliased; their scene lists in order."""
+        if not inputs:
+            return []
+        args = ", ".join(f"$i{n}: SceneQueryInput!" for n in range(len(inputs)))
+        body = "\n".join(f"a{n}: queryScenes(input: $i{n}) {{ scenes {{ ...SceneCard }} }}"
+                         for n in range(len(inputs)))
+        data = self.query(SCENE_CARD + f"\nquery ({args}) {{\n{body}\n}}",
+                          {f"i{n}": inp for n, inp in enumerate(inputs)}, ttl)
+        return [data[f"a{n}"]["scenes"] for n in range(len(inputs))]
 
     def find_scene(self, scene_id):
         q = SCENE_FULL + "\nquery ($id: ID!) { findScene(id: $id) { ...SceneFull } }"
@@ -1697,55 +1709,117 @@ class App:
         return scene
 
     def similar(self, scene_id, user=None):
-        """Scenes like this one, for the reel under it: with the same women (everyone, in a
-        scene without any) or the same kind of action (its ACTION and SCENE tags, the user's
-        favourite tags first; any tags if it has none of those). Most in common first: a
-        shared performer, and a shared favourite tag, count as much as SIMILAR_PERFORMER and
-        SIMILAR_FAV_TAG other shared tags; a favourite tag this scene lacks counts as one.
-        StashDB's popularity breaks ties."""
+        """The reels under a scene.
+
+        With favourite performers: scenes with any of them (StashDB favourites and those
+        Whisparr follows), SIMILAR_FAV_PERFORMER for each, plus the tag score. Discover:
+        scenes with none of them (so never the same scene twice), by the tag score alone. Tag score, per tag of the other
+        scene: one this scene has too 1, one of the user's favourites 2, both 5. Both look
+        among StashDB's most popular scenes with this one's tags (its ACTION and SCENE tags,
+        favourites first; all of the first three, fewer if that finds too little).
+        Together again: other scenes with two or more of this cast, the most of them first,
+        then the newest; they're left out of the other two. Popularity breaks ties.
+        """
         scene = self.stash.find_scene(scene_id)
         if not scene:
             raise ApiError(404, "StashDB has no scene with that ID.")
-        cast = [p["performer"] for p in scene.get("performers") or []]
-        women = {p["id"] for p in cast if p.get("gender") in WOMEN} or {p["id"] for p in cast}
         tags = scene.get("tags") or []
+        mine = {t["id"] for t in tags}
+        fav_tags = set(self.fav_tag_ids(user)) if user else set()
         action = [t["id"] for t in tags if (t.get("category") or {}).get("group") in ("ACTION", "SCENE")]
         action = action or [t["id"] for t in tags]
-        favs = set(self.fav_tag_ids(user)) if user else set()
-        action.sort(key=lambda t: t not in favs)
-        found = {}
+        action.sort(key=lambda t: t not in fav_tags)
+        cast = list(dict.fromkeys(p["performer"]["id"] for p in scene.get("performers") or []))
+        favs = self.favourite_performers()
 
-        def add(criteria):
-            inp = dict({"page": 1, "per_page": SIMILAR_FETCH, "sort": "POPULARITY",
-                        "direction": "DESC"}, **criteria)
+        def people(sc):
+            return {p["performer"]["id"] for p in sc.get("performers") or []}
+
+        def gather(criteria, keep):
+            """Candidates: the most popular scenes with this one's first tags (and criteria)."""
+            found = {}
+            steps = [action[:n] for n in (3, 2, 1) if len(action) >= n]
+            if criteria:
+                steps.append([])  # then any of theirs
+            for step in steps:
+                inp = dict({"page": 1, "per_page": SIMILAR_FETCH, "sort": "POPULARITY",
+                            "direction": "DESC"}, **criteria)
+                if step:
+                    inp["tags"] = {"value": step, "modifier": "INCLUDES_ALL"}
+                try:
+                    scenes = self.stash.query_scenes(inp, SIMILAR_TTL)["scenes"]
+                except ApiError as e:
+                    print(f"similar scenes for {scene_id}: {e.message}", file=sys.stderr, flush=True)
+                    continue
+                for sc in scenes:
+                    if sc["id"] != scene_id and keep(sc):
+                        found.setdefault(sc["id"], sc)
+                if len(found) >= SIMILAR_MAX:
+                    break
+            return found
+
+        def together():
+            pairs = list(itertools.combinations(cast[:SIMILAR_CAST], 2))
             try:
-                for sc in self.stash.query_scenes(inp, SIMILAR_TTL)["scenes"]:
-                    found.setdefault(sc["id"], sc)
+                answers = self.stash.query_scenes_many(
+                    [{"page": 1, "per_page": SIMILAR_FETCH, "sort": "DATE", "direction": "DESC",
+                      "performers": {"value": list(pair), "modifier": "INCLUDES_ALL"}} for pair in pairs],
+                    SIMILAR_TTL)
             except ApiError as e:
-                print(f"similar scenes for {scene_id}: {e.message}", file=sys.stderr, flush=True)
+                print(f"together again for {scene_id}: {e.message}", file=sys.stderr, flush=True)
+                return []
+            found = {sc["id"]: sc for scenes in answers for sc in scenes if sc["id"] != scene_id}
+            newest = sorted(found.values(), key=lambda sc: sc.get("release_date") or "", reverse=True)
+            return sorted(newest, key=lambda sc: -len(people(sc) & set(cast)))
 
-        if women:
-            add({"performers": {"value": sorted(women)[:20], "modifier": "INCLUDES"}})
-        for n in sorted({min(3, len(action)), min(2, len(action))} - {0}, reverse=True):
-            before = len(found)  # all of its first three tags; two if that finds too little
-            add({"tags": {"value": action[:n], "modifier": "INCLUDES_ALL"}})
-            if len(found) - before >= SIMILAR_MAX:
-                break
-        found.pop(scene_id, None)
-        mine = {t["id"] for t in tags}
+        timing = Timing.current()
+
+        def run(fn):
+            Timing.begin(timing)
+            return fn()
+        jobs = [lambda: gather({"performers": {"value": sorted(favs)[:SIMILAR_FAVS], "modifier": "INCLUDES"}},
+                               lambda sc: people(sc) & favs) if favs else {},
+                lambda: gather({}, lambda sc: not people(sc) & favs),
+                together]
+        with ThreadPoolExecutor(len(jobs)) as pool:
+            inner, outer, again = pool.map(run, jobs)
+        again = again[:SIMILAR_MAX]
+        for sid in {sc["id"] for sc in again}:
+            inner.pop(sid, None)
+            outer.pop(sid, None)
         try:
-            their_tags = self.scene_tags(list(found))
+            their_tags = self.scene_tags(list(inner) + list(outer))
         except ApiError:
             their_tags = {}
 
-        def score(sc):
-            shared = len({p["performer"]["id"] for p in sc.get("performers") or []} & women)
-            theirs = set(their_tags.get(sc["id"], ()))
-            return (SIMILAR_PERFORMER * shared + len(theirs & mine)
-                    + (SIMILAR_FAV_TAG - 1) * len(theirs & mine & favs) + len(theirs & favs - mine))
-        order = {sid: n for n, sid in enumerate(found)}
-        ranked = sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))
-        return {"scenes": self.annotate(ranked[:SIMILAR_MAX])}
+        def tag_score(sc):
+            return sum(5 if t in mine and t in fav_tags else 1 if t in mine else 2 if t in fav_tags else 0
+                       for t in set(their_tags.get(sc["id"], ())))
+
+        def ranked(found, score):
+            order = {sid: n for n, sid in enumerate(found)}
+            return sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))[:SIMILAR_MAX]
+
+        rows = [("inner", "Similar scenes with favourite performers", "",
+                 ranked(inner, lambda sc: SIMILAR_FAV_PERFORMER * len(people(sc) & favs) + tag_score(sc))),
+                ("discover", "Discover similar scenes", "", ranked(outer, tag_score)),
+                ("together", "Together again", "Two or more of this cast in another scene", again)]
+        return {"rows": [{"key": key, "title": title, "sub": sub, "scenes": self.annotate(scenes)}
+                         for key, title, sub, scenes in rows if scenes]}
+
+    def favourite_performers(self):
+        """StashDB's favourite performers and the ones Whisparr follows: the inner circle."""
+        ids = {p["id"] for p in self.whisparr.followed.get("performers", [])}
+        try:
+            for page in range(1, 4):
+                res = self.stash.query_performers({"page": page, "per_page": 100, "sort": "NAME",
+                                                   "direction": "ASC", "is_favorite": True})
+                ids.update(p["id"] for p in res["performers"])
+                if page * 100 >= res["count"]:
+                    break
+        except ApiError as e:
+            print(f"favourite performers: {e.message}", file=sys.stderr, flush=True)
+        return ids
 
     def performer(self, pid):
         perf = self.stash.find_performer(pid)
