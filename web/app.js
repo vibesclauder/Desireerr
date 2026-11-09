@@ -1130,8 +1130,18 @@ async function viewScene(view, id, ctx) {
       </div>
       <aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>
     </div>
+    <div id="similar"></div>
   </div>`.s;
   $(".page", view).addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(s.images, +b.dataset.photo, s.title); });
+  similarScenes($("#similar", view), id, ctx);
+}
+
+// The reel under a scene: same women, same kind of action. Loaded after the page, which is
+// complete without it.
+async function similarScenes(el, id, ctx) {
+  let r;
+  try { r = await api(`scene/${id}/similar`); } catch { return; }
+  if (ctx.alive() && r.scenes.length) el.outerHTML = slider("Similar scenes", r.scenes, "scenes", null, sceneCard).s;
 }
 
 function favoriteButton(kind, item) {

@@ -380,6 +380,62 @@ class Favourites(unittest.TestCase):
         self.assertEqual(self.app.whisparr.calls, [])     # nothing followed, nothing wanted
 
 
+class Similar(unittest.TestCase):
+    W1, W2, M1 = "aaaaaaaa-0000-0000-0000-00000000000" + "1", "aaaaaaaa-0000-0000-0000-000000000002", "bbbbbbbb-0000-0000-0000-000000000001"
+    A, B, C = "cccccccc-0000-0000-0000-00000000000a", "cccccccc-0000-0000-0000-00000000000b", "cccccccc-0000-0000-0000-00000000000c"
+    X, Y, Z = "dddddddd-0000-0000-0000-00000000000" + "1", "dddddddd-0000-0000-0000-000000000002", "dddddddd-0000-0000-0000-000000000003"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = make_app(self.tmp.name)
+        self.stash = self.app.stash
+        self.stash.tags = {}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def card(self, sid, *people):
+        return {"id": sid, "title": sid, "performers": [{"as": None, "performer": {"id": p}} for p in people]}
+
+    def cast(self, *people):
+        sc = scene()
+        sc["performers"] = [{"as": None, "performer": {"id": p, "gender": g}} for p, g in people]
+        sc["tags"] = [{"id": self.A, "category": {"group": "ACTION"}},
+                      {"id": self.B, "category": {"group": "SCENE"}},
+                      {"id": self.C, "category": {"group": "PEOPLE"}}]
+        self.stash.scenes[SCENE] = sc
+
+    def test_same_women_first_then_most_tags_in_common(self):
+        self.cast((self.W1, "FEMALE"), (self.M1, "MALE"))
+        self.stash.listed = [self.card(self.Y, self.M1), self.card(SCENE, self.W1, self.M1),
+                             self.card(self.Z), self.card(self.X, self.W1)]
+        self.stash.tags = {self.X: [self.A], self.Z: [self.A, self.B, self.C]}
+        got = [sc["id"] for sc in self.app.similar(SCENE)["scenes"]]
+        self.assertEqual(got, [self.X, self.Z, self.Y])  # the man alone counts for nothing
+        self.assertEqual(self.stash.queries[0]["performers"], {"value": [self.W1], "modifier": "INCLUDES"})
+        self.assertEqual(self.stash.queries[1]["tags"], {"value": [self.A, self.B], "modifier": "INCLUDES_ALL"})
+        self.assertEqual(len(self.stash.queries), 2)
+
+    def test_without_women_everyone_counts(self):
+        self.cast((self.M1, "MALE"))
+        self.stash.listed = [self.card(self.Z), self.card(self.Y, self.M1)]
+        self.assertEqual([sc["id"] for sc in self.app.similar(SCENE)["scenes"]], [self.Y, self.Z])
+
+    def test_stashdb_trouble_leaves_the_rest(self):
+        self.cast((self.W1, "FEMALE"))
+        self.stash.listed = [self.card(self.X, self.W1)]
+        queries = self.stash.query_scenes
+
+        def flaky(inp, ttl=300):
+            if "tags" in inp:
+                raise d.ApiError(502, "StashDB is down")
+            return queries(inp, ttl)
+        self.stash.query_scenes = flaky
+        self.assertEqual([sc["id"] for sc in self.app.similar(SCENE)["scenes"]], [self.X])
+        with self.assertRaises(d.ApiError):
+            self.app.similar(OTHER[:-1] + "0")
+
+
 class Images(unittest.TestCase):
     def test_only_stashdb_hosts(self):
         ok = d.Images.allowed

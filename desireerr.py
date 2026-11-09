@@ -38,7 +38,7 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "1.0"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
@@ -68,6 +68,11 @@ JELLYFIN_MAX_AGE = 600       # seconds between Jellyfin library refreshes
 NFO_BATCH = 50               # .nfo files written per background round at most
 NFO_RETRY = 86400            # a scene StashDB didn't have is tried again after this long
 NFO_MARK = "Desireerr"       # in the comment at the top of the .nfo files we write
+SIMILAR_MAX = 24             # scenes in a scene page's "Similar scenes" reel
+SIMILAR_FETCH = 30           # candidates per StashDB query for it
+SIMILAR_PERFORMER = 3        # a shared performer weighs as much as this many shared tags
+SIMILAR_TTL = 3600
+WOMEN = {"FEMALE", "TRANSGENDER_FEMALE"}
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -1690,6 +1695,51 @@ class App:
         scene["stashdb_url"] = f"{STASHDB_WEB}/scenes/{scene_id}"
         return scene
 
+    def similar(self, scene_id):
+        """Scenes like this one, for the reel under it: with the same women (everyone, in a
+        scene without any) or the same kind of action (its ACTION and SCENE tags; any tags
+        if it has none of those). Most in common first: a shared performer counts as much as
+        SIMILAR_PERFORMER shared tags; StashDB's popularity breaks ties."""
+        scene = self.stash.find_scene(scene_id)
+        if not scene:
+            raise ApiError(404, "StashDB has no scene with that ID.")
+        cast = [p["performer"] for p in scene.get("performers") or []]
+        women = {p["id"] for p in cast if p.get("gender") in WOMEN} or {p["id"] for p in cast}
+        tags = scene.get("tags") or []
+        action = [t["id"] for t in tags if (t.get("category") or {}).get("group") in ("ACTION", "SCENE")]
+        action = action or [t["id"] for t in tags]
+        found = {}
+
+        def add(criteria):
+            inp = dict({"page": 1, "per_page": SIMILAR_FETCH, "sort": "POPULARITY",
+                        "direction": "DESC"}, **criteria)
+            try:
+                for sc in self.stash.query_scenes(inp, SIMILAR_TTL)["scenes"]:
+                    found.setdefault(sc["id"], sc)
+            except ApiError as e:
+                print(f"similar scenes for {scene_id}: {e.message}", file=sys.stderr, flush=True)
+
+        if women:
+            add({"performers": {"value": sorted(women)[:20], "modifier": "INCLUDES"}})
+        for n in sorted({min(3, len(action)), min(2, len(action))} - {0}, reverse=True):
+            before = len(found)  # all of its first three tags; two if that finds too little
+            add({"tags": {"value": action[:n], "modifier": "INCLUDES_ALL"}})
+            if len(found) - before >= SIMILAR_MAX:
+                break
+        found.pop(scene_id, None)
+        mine = {t["id"] for t in tags}
+        try:
+            their_tags = self.scene_tags(list(found))
+        except ApiError:
+            their_tags = {}
+
+        def score(sc):
+            shared = len({p["performer"]["id"] for p in sc.get("performers") or []} & women)
+            return SIMILAR_PERFORMER * shared + len(mine & set(their_tags.get(sc["id"], ())))
+        order = {sid: n for n, sid in enumerate(found)}
+        ranked = sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))
+        return {"scenes": self.annotate(ranked[:SIMILAR_MAX])}
+
     def performer(self, pid):
         perf = self.stash.find_performer(pid)
         if not perf:
@@ -2313,6 +2363,8 @@ class Handler(BaseHTTPRequestHandler):
             return 200, app.browse_scenes(q, user), None
         if key == ("GET", "scene") and len(parts) == 2:
             return 200, app.scene(parts[1]), None
+        if key == ("GET", "scene") and len(parts) == 3 and parts[2] == "similar":
+            return 200, app.similar(parts[1]), None
         if key == ("GET", "search"):
             return 200, app.search(q.get("q")), None
         if key == ("GET", "performers"):

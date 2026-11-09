@@ -17,6 +17,9 @@ or available.
   favourites and change settings. Other users' requests wait for approval unless they're auto-approved.
 - **Saved searches.** Any filter on the Scenes page (tags in and out, performers, studios,
   favourites) can request its new scenes every hour, which Whisparr's follows can't.
+- **Scene pages.** The cast with their ages then and now (and a † for those who died), and a
+  "Similar scenes" reel at the bottom: scenes with the same women (everyone, if there are no
+  women in it) or the same kind of action, the ones with the most in common first.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.
