@@ -397,9 +397,8 @@ class Similar(unittest.TestCase):
         self.listed, self.pairs, self.queries = [], {}, []  # StashDB's answer to every search
         self.favs = ["w1"]                                                  # StashDB favourites
         self.app.whisparr.followed = {"performers": [{"id": "f2"}, {"id": "f3"}], "studios": []}
-        self.app.fav_tag_ids = lambda user: ["A", "D"] if user else []
-        self.disliked = ["E"]
-        self.app.disliked_tag_ids = lambda user: self.disliked if user else []
+        self.feel = {"A": 1, "D": 1, "E": -1}  # liked A and D, disliked E
+        self.app.feelings = lambda user: self.feel if user else {}
 
         def query_scenes(inp, ttl=300):
             self.queries.append(inp)
@@ -465,10 +464,20 @@ class Similar(unittest.TestCase):
         self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4", "y1"])  # not for nobody
 
     def test_disliked_tags_are_not_searched_for(self):
-        self.disliked = ["B"]
+        self.feel = {"A": 1, "D": 1, "B": -1, "C": -2}
         self.rows()
         self.assertTrue(self.asked(None, ["A"]))
         self.assertFalse(any("B" in (q.get("tags") or {}).get("value", []) for q in self.queries))
+
+    def test_loved_and_hated_tags(self):
+        self.feel = {"A": 2, "D": 2, "E": -1, "H": -2}
+        self.listed = [self.card("x1", "w1"), self.card("x2", "w1"), self.card("y1"), self.card("y2"),
+                       self.card("y3"), self.card("y4")]
+        self.app.stash.tags = {"x1": ["A", "H"], "x2": ["D"], "y1": ["E", "D"], "y2": ["E", "A"],
+                               "y3": ["H", "A", "D"], "y4": ["B"]}
+        rows = self.rows()
+        self.assertEqual(rows["inner"], ["x2"])            # x1 has a hated tag
+        self.assertEqual(rows["discover"], ["y2", "y4"])  # y2: 10 > 5, so 5; y1: 4, not more than 5
 
     def test_together_again_most_of_the_cast_then_newest(self):
         self.pairs = {("w1", "w2"): [self.card("t1", "w1", "w2", date="2020-01-01"),
@@ -520,17 +529,30 @@ class TagFeelings(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_a_tag_is_favourite_or_disliked_not_both(self):
+    def test_one_feeling_per_tag(self):
         app, u = self.app, self.user
-        app.set_fav_tag(u, self.TAG, True)
-        self.assertEqual(app.set_disliked_tag(u, self.TAG, True), [{"id": self.TAG, "name": "Tag 1"}])
-        self.assertEqual(app.fav_tag_ids(u), [])
-        app.set_fav_tag(u, self.TAG, True)
-        self.assertEqual((app.fav_tag_ids(u), app.disliked_tag_ids(u)), ([self.TAG], []))
-        app.set_disliked_tag(u, self.TAG, False)  # not disliked: still a favourite
+        for feeling in ("love", "like", "dislike", "hate"):
+            self.assertEqual(app.set_tag_feeling(u, self.TAG, feeling),
+                             [{"id": self.TAG, "name": "Tag 1", "feeling": feeling}])
+        self.assertEqual(app.feelings(u), {self.TAG: -2})
+        self.assertEqual(app.fav_tag_ids(u), [])                 # favourites: loved and liked
+        app.set_tag_feeling(u, self.TAG, "love")
         self.assertEqual(app.fav_tag_ids(u), [self.TAG])
+        self.assertEqual(app.set_tag_feeling(u, self.TAG, "neutral"), [])
         with self.assertRaises(d.ApiError):
-            app.set_disliked_tag(u, "bbbbbbbb-0000-0000-0000-000000000001", True)
+            app.set_tag_feeling(u, "bbbbbbbb-0000-0000-0000-000000000001", "hate")
+
+    def test_old_favourite_and_disliked_tags_move_over(self):
+        path = self.app.db.path
+        conn = self.app.db.conn
+        for table in ("favorite_tags", "disliked_tags"):
+            conn.execute(f"CREATE TABLE {table} (user_id INTEGER, tag_id TEXT, name TEXT, created INTEGER)")
+        conn.execute("INSERT INTO favorite_tags VALUES (?, 'f', 'Fav', 0)", (self.user["id"],))
+        conn.execute("INSERT INTO disliked_tags VALUES (?, 'd', 'Dis', 0)", (self.user["id"],))
+        db = d.DB(path)
+        self.assertEqual(db.all("SELECT tag_id, feeling FROM tag_feelings ORDER BY tag_id"),
+                         [{"tag_id": "d", "feeling": -1}, {"tag_id": "f", "feeling": 1}])
+        self.assertEqual(db.all("SELECT name FROM sqlite_master WHERE name LIKE '%_tags'"), [])
 
 
 class Images(unittest.TestCase):
@@ -635,16 +657,15 @@ class Http(unittest.TestCase):
 
     def test_favourite_tags_over_http(self):
         self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
-        status, out = self.req("POST", "/api/favorite-tags", {"id": TAG, "favorite": True})
-        self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1"}]))
+        status, out = self.req("POST", "/api/tag-feelings", {"id": TAG, "feeling": "love"})
+        self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1", "feeling": "love"}]))
         self.assertEqual(self.req("GET", "/api/status")[1]["fav_tags"], [{"id": TAG, "name": "Tag 1"}])
-        self.assertEqual(self.req("POST", "/api/favorite-tags", {"id": "x\" evil"})[0], 400)
-        status, out = self.req("POST", "/api/disliked-tags", {"id": TAG, "disliked": True})
-        self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1"}]))
+        self.req("POST", "/api/tag-feelings", {"id": TAG, "feeling": "hate"})
         status, out = self.req("GET", "/api/status")
-        self.assertEqual((out["fav_tags"], out["disliked_tags"]), ([], [{"id": TAG, "name": "Tag 1"}]))
-        self.assertTrue(self.req("GET", f"/api/tag/{TAG}")[1]["is_disliked"])
-        self.assertEqual(self.req("POST", "/api/disliked-tags", {"id": "x\" evil"})[0], 400)
+        self.assertEqual((out["fav_tags"], out["tag_feelings"]), ([], [{"id": TAG, "name": "Tag 1", "feeling": "hate"}]))
+        self.assertEqual(self.req("GET", f"/api/tag/{TAG}")[1]["feeling"], "hate")
+        self.assertEqual(self.req("POST", "/api/tag-feelings", {"id": "x\" evil", "feeling": "love"})[0], 400)
+        self.assertEqual(self.req("POST", "/api/tag-feelings", {"id": TAG, "feeling": "meh"})[0], 400)
 
     def test_status_remembers_where_the_app_is_opened(self):
         self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
@@ -1017,12 +1038,14 @@ class FavouriteTags(Base):
         self.app.stash.listed = [card(SCENE, "2026-11-07T10:00:00Z"), card(OTHER, "2026-11-06T10:00:00Z")]
 
     def test_per_user_with_stashdb_names(self):
-        self.assertEqual(self.app.set_fav_tag(self.user, TAG, True), [{"id": TAG, "name": "Tag 1"}])
-        self.app.set_fav_tag(self.user, TAG, True)           # twice is fine
+        self.assertEqual(self.app.set_tag_feeling(self.user, TAG, "like"),
+                         [{"id": TAG, "name": "Tag 1", "feeling": "like"}])
+        self.app.set_tag_feeling(self.user, TAG, "like")     # twice is fine
+        self.assertEqual(self.app.fav_tags(self.user), [{"id": TAG, "name": "Tag 1"}])
         self.assertEqual(self.app.fav_tags(self.admin), [])
-        self.assertEqual(self.app.set_fav_tag(self.user, TAG, False), [])
+        self.assertEqual(self.app.set_tag_feeling(self.user, TAG, "neutral"), [])
         with self.assertRaises(d.ApiError):
-            self.app.set_fav_tag(self.user, "bbbbbbbb-0000-0000-0000-000000000000", True)
+            self.app.set_tag_feeling(self.user, "bbbbbbbb-0000-0000-0000-000000000000", "like")
 
     def test_plan(self):
         favs = [TAG, TAG2]
@@ -1040,10 +1063,10 @@ class FavouriteTags(Base):
     def test_browse_with_favourite_tags(self):
         self.assertEqual(self.app.browse_scenes({"fav_tags": "1"}, self.user)["scenes"], [])   # none yet
         self.assertEqual(self.app.stash.queries, [])
-        self.app.set_fav_tag(self.user, TAG, True)
+        self.app.set_tag_feeling(self.user, TAG, "like")
         self.app.browse_scenes({"fav_tags": "1"}, self.user)
         self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG], "modifier": "INCLUDES"})
-        self.app.set_fav_tag(self.user, TAG2, True)
+        self.app.set_tag_feeling(self.user, TAG2, "like")
         out = self.app.browse_scenes({"fav_tags": "1", "tags": TAG}, self.user)
         self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG, TAG2], "modifier": "INCLUDES"})
         self.assertEqual([x["id"] for x in out["scenes"]], [SCENE])        # OTHER lacks the picked TAG
@@ -1051,12 +1074,12 @@ class FavouriteTags(Base):
     def test_saved_search_follows_the_favourites(self):
         w = self.app.save_watch(self.admin, {"name": "Favs", "query": "fav_tags=1", "since": "2026-11-01"})
         self.assertEqual(self.app.check_watch(w["id"])["found"], 0)          # no favourites yet
-        self.app.set_fav_tag(self.admin, TAG, True)
+        self.app.set_tag_feeling(self.admin, TAG, "like")
         self.app.stash.listed = self.app.stash.listed[:1]   # what StashDB answers for TAG
         self.assertEqual(self.app.check_watch(w["id"])["requested"], 1)
         self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG], "modifier": "INCLUDES"})
         self.app.db.run("UPDATE watches SET cursor = 'x'")
-        self.app.set_fav_tag(self.admin, TAG2, True)                         # looks again
+        self.app.set_tag_feeling(self.admin, TAG2, "like")                         # looks again
         self.assertEqual(self.app.db.one("SELECT cursor FROM watches")["cursor"], "")
 
 

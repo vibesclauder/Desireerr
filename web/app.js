@@ -140,9 +140,13 @@ function fmtAgo(ts) {
 const titleCase = (s) => (s || "").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const performerName = (p) => p.as || p.performer?.name || "";
 // Favourite tags are Desireerr's own (StashDB has none), per user; status carries them.
-const isFavTag = (id) => (status.fav_tags || []).some((t) => t.id === id);
-const isDislikedTag = (id) => (status.disliked_tags || []).some((t) => t.id === id);
-const tagChip = (t, extra = "") => html`<a class="chip ${isFavTag(t.id) ? "fav" : isDislikedTag(t.id) ? "disliked" : ""}" href="/tag/${t.id}" title="${isDislikedTag(t.id) ? "You dislike this tag" : t.description || ""}">${isFavTag(t.id) ? icon("heartFill") : isDislikedTag(t.id) ? icon("thumbDown") : ""}${t.name}${extra}</a>`;
+// A user's feeling for a tag (neutral without one), and how a tag chip shows it.
+const FEELINGS = [["hate", "Hate", "ban"], ["dislike", "Dislike", "thumbDown"], ["neutral", "Neutral", ""], ["like", "Like", "heart"], ["love", "Love", "heartFill"]];
+const feelingOf = (id) => (status.tag_feelings || []).find((t) => t.id === id)?.feeling || "neutral";
+const tagChip = (t, extra = "") => {
+  const f = feelingOf(t.id), ic = FEELINGS.find(([k]) => k === f)[2];
+  return html`<a class="chip feel-${f}" href="/tag/${t.id}" title="${f === "neutral" ? t.description || "" : `You ${f} this tag`}">${ic ? icon(ic) : ""}${t.name}${extra}</a>`;
+};
 
 // ---------------------------------------------------------------------------------------
 // Icons
@@ -165,6 +169,7 @@ const ICONS = {
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   download: '<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>',
   heart: '<path d="M12 20.5C6 16.8 3 13.3 3 9.6 3 6.9 5.1 5 7.6 5c1.9 0 3.4 1 4.4 2.6C13 6 14.5 5 16.4 5 18.9 5 21 6.9 21 9.6c0 3.7-3 7.2-9 10.9z"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
   thumbDown: '<path d="M17 3v11M17 3h3v11h-3M17 14l-4.2 7a2.4 2.4 0 0 1-2.3-2.4V15H5.3a2 2 0 0 1-2-2.3l1.2-7.6a2 2 0 0 1 2-1.6H17"/>',
   heartFill: '<path fill="currentColor" stroke="none" d="M12 20.5C6 16.8 3 13.3 3 9.6 3 6.9 5.1 5 7.6 5c1.9 0 3.4 1 4.4 2.6C13 6 14.5 5 16.4 5 18.9 5 21 6.9 21 9.6c0 3.7-3 7.2-9 10.9z"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
@@ -557,16 +562,16 @@ document.addEventListener("click", async (e) => {
       const r = await api("requests/search-stalled", { method: "POST" });
       toast(`Whisparr is searching again for ${r.searched} request${r.searched === 1 ? "" : "s"}.`);
       afterChange(null, null);
-    } else if (act === "favtag") {
-      const fav = b.dataset.favorite === "1";
-      await api("favorite-tags", { method: "POST", body: { id: b.dataset.id, favorite: fav } });
-      toast(fav ? "Added to your favourite tags. Use them as a filter; nothing is downloaded for them." : "Removed from your favourite tags.");
-      await refreshStatus();
-      render();
-    } else if (act === "distag") {
-      const dis = b.dataset.disliked === "1";
-      await api("disliked-tags", { method: "POST", body: { id: b.dataset.id, disliked: dis } });
-      toast(dis ? "Disliked. Scenes with it stay out of the reels under a scene, unless your favourite tags outweigh it." : "Not disliked any more.");
+    } else if (act === "feeling") {
+      const f = b.dataset.feeling;
+      await api("tag-feelings", { method: "POST", body: { id: b.dataset.id, feeling: f } });
+      toast({
+        love: "Loved: weighs most in the reels under a scene, and it's one of your favourite tags (a filter on Discover and Scenes).",
+        like: "Liked: weighs in the reels under a scene, and it's one of your favourite tags (a filter on Discover and Scenes).",
+        neutral: "Neutral again.",
+        dislike: "Disliked: scenes with it stay out of the reel with your favourite performers, and in Discover only if tags you love or like outweigh it.",
+        hate: "Hated: scenes with it are never recommended under a scene.",
+      }[f]);
       await refreshStatus();
       render();
     } else if (act === "favorite") {
@@ -719,7 +724,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
         <div class="field"><span>Match</span><div class="seg" id="f-mode"><button type="button" data-v="all" class="${f.tag_mode === "all" ? "on" : ""}">All tags</button><button type="button" data-v="any" class="${f.tag_mode === "any" ? "on" : ""}">Any tag</button></div></div>
         <div class="field grow"><span>Without tags</span><div id="f-not"></div></div>
       </div>
-      ${status.fav_tags?.length || f.fav_tags ? html`<div class="filter-row"><label class="check"><input type="checkbox" id="f-favtags" ${f.fav_tags ? "checked" : ""}> With any of my favourite tags${status.fav_tags?.length ? ` (${status.fav_tags.map((t) => t.name).join(", ")})` : " (none yet: add some on a tag's page)"}</label></div>` : ""}
+      ${status.fav_tags?.length || f.fav_tags ? html`<div class="filter-row"><label class="check"><input type="checkbox" id="f-favtags" ${f.fav_tags ? "checked" : ""}> With any of the tags I love or like${status.fav_tags?.length ? ` (${status.fav_tags.map((t) => t.name).join(", ")})` : " (none yet: pick Love or Like on a tag's page)"}</label></div>` : ""}
       <div class="filter-row">
         ${hide.includes("performers") ? "" : html`<div class="field grow"><span>${fixed.performers ? "Also with" : "Performers"}</span><div id="f-perf"></div></div>`}
         ${hide.includes("studios") ? "" : html`<div class="field grow"><span>Studios</span><div id="f-studio"></div></div>`}
@@ -1259,12 +1264,7 @@ async function viewTag(view, id, ctx) {
   view.innerHTML = html`<div class="page">
     <div class="section" style="gap:8px">
       <div class="page-title"><h1>${t.name}</h1>${t.category ? html`<a class="chip" href="/tags#cat-${t.category.id}">${t.category.name}</a>` : ""}
-        ${t.is_favorite
-          ? html`<button class="btn small" data-act="favtag" data-id="${t.id}" data-favorite="0" title="Remove from your favourite tags">${icon("heartFill")}Favourite</button>`
-          : html`<button class="btn small" data-act="favtag" data-id="${t.id}" data-favorite="1" title="Your favourite tags: a filter on Discover and Scenes, and for saved searches. Nothing is downloaded for them.">${icon("heart")}Add to favourites</button>`}
-        ${t.is_disliked
-          ? html`<button class="btn small" data-act="distag" data-id="${t.id}" data-disliked="0" title="Don't dislike it any more">${icon("thumbDown")}Disliked</button>`
-          : html`<button class="btn small ghost" data-act="distag" data-id="${t.id}" data-disliked="1" title="Scenes with it stay out of the reels under a scene (in Discover, unless your favourite tags outweigh it). Disliking takes it out of your favourites.">${icon("thumbDown")}Dislike</button>`}</div>
+        <div class="seg feelings" role="group" aria-label="How you feel about this tag">${FEELINGS.map(([k, label, ic]) => html`<button type="button" class="${k === t.feeling ? `on feel-${k}` : ""}" data-act="feeling" data-id="${t.id}" data-feeling="${k}" aria-pressed="${k === t.feeling}">${ic ? icon(ic) : ""}${label}</button>`)}</div></div>
       ${t.description ? html`<p class="prose" style="margin:0">${t.description}</p>` : ""}
       ${t.aliases?.length ? html`<div class="note">Also called: ${t.aliases.join(", ")}</div>` : ""}
       <div class="note">Add more tags below to narrow it down, or leave some out.</div>
@@ -1282,10 +1282,11 @@ async function viewTags(view, ctx) {
   for (const c of categories) (byGroup[c.group] ||= []).push(c);
   view.innerHTML = html`<div class="page">
     <div class="page-title"><h1>Tags</h1><span class="sub">Pick a tag to see its scenes, then add more tags to combine them.</span></div>
-    ${status.fav_tags?.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>Your favourite tags</h2><a class="more" href="/scenes?fav_tags=1">Scenes with any of them${icon("chevron")}</a></div>
-      <div class="chips">${status.fav_tags.map((t) => tagChip(t))}</div></section>` : ""}
-    ${status.disliked_tags?.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>Your disliked tags</h2></div>
-      <div class="chips">${status.disliked_tags.map((t) => tagChip(t))}</div></section>` : ""}
+    ${[["love", "Tags you love"], ["like", "Tags you like"], ["dislike", "Tags you dislike"], ["hate", "Tags you hate"]].map(([k, title]) => {
+      const ts = (status.tag_feelings || []).filter((t) => t.feeling === k);
+      return ts.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>${title}</h2>${k === "love" || (k === "like" && !status.tag_feelings.some((t) => t.feeling === "love")) ? html`<a class="more" href="/scenes?fav_tags=1">Scenes with any you love or like${icon("chevron")}</a>` : ""}</div>
+      <div class="chips">${ts.map((t) => tagChip(t))}</div></section>` : "";
+    })}
     <div class="filters">
       <div class="filter-row"><label class="field grow"><span>Find a tag</span><input class="input" id="t-q" type="search" placeholder="Tag name or alias" autocomplete="off"></label></div>
       <div class="chips" id="t-hits"></div>

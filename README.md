@@ -26,10 +26,18 @@ or available.
   - *Together again*: other scenes with two or more of this cast, the most of them first.
 
   The first two look among StashDB's most popular scenes with this one's action tags and with
-  those performers, and add the tags: a tag this scene has too counts 1, one of your favourite
-  tags 2, both 5, and a tag you dislike (the button on a tag's page) -5. A scene with a
-  disliked tag is never in the first reel, and in Discover only if its favourite tags
-  outweigh its disliked ones.
+  those performers, and add the tags by how you feel about them (on a tag's page):
+
+  | Tag | in the other scene | in both |
+  |---|---|---|
+  | Love | 4 | 10 |
+  | Like | 2 | 5 |
+  | Neutral | 0 | 1 |
+  | Dislike | -5 | -5 |
+  | Hate | never recommended | |
+
+  A scene with a disliked tag is never in the first reel, and in Discover only if the tags
+  you love and like outweigh its disliked ones.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.
@@ -94,10 +102,12 @@ On a phone, open it and "Add to home screen" for an app icon.
   Scenes page's Favourites filter, "favourites only" on Performers and Studios, and saved
   searches. Nothing is downloaded for them. (Whisparr's own StashDB import list, if you
   switch it on, does add favourites to Whisparr, with their whole back catalogue.)
-- **Favourite tags** (anyone, the heart on a tag's page): StashDB has none, so Desireerr keeps
-  them, per user. They're a filter too: "With any of my favourite tags" on Scenes (and saved
-  searches, which use your favourites as they are at each check), a Discover row, and the
-  top of the Tags page; favourite tags are marked with a heart wherever tags are listed.
+- **Tag feelings** (anyone, on a tag's page): love, like, neutral (the default), dislike or
+  hate. StashDB has none, so Desireerr keeps them, per user. They weigh in the reels under a
+  scene (above), and the tags you love or like are your favourite tags: a filter, "With any
+  of the tags I love or like" on Scenes (and saved searches, which use them as they are at
+  each check), a Discover row, and the top of the Tags page. Wherever tags are listed, they
+  show how you feel about them.
   StashDB takes one tags condition per search: with tags picked as well, the favourites go
   to StashDB and the picked tags are checked by Desireerr, so pages can come back short
   (with a single favourite tag and "All tags", it's one exact search).

@@ -76,7 +76,9 @@ SIMILAR_FAV_PERFORMER = 10   # a favourite performer
 SIMILAR_FAV_HERE = 25        # a favourite performer who's in this scene too
 SIMILAR_FAVS = 200           # favourite performers asked about at most
 SIMILAR_CAST = 6             # Together again: pairs from this much of the cast (15 pairs)
-SIMILAR_DISLIKED = 5         # a disliked tag takes this off; see App.similar
+FEELINGS = {"love": 2, "like": 1, "dislike": -1, "hate": -2}  # a user's for a tag; else neutral
+# Under a scene, what a tag of another scene adds: (as it is, if this scene has it too).
+FEELING_SCORE = {2: (4, 10), 1: (2, 5), 0: (0, 1), -1: (-5, -5)}  # hate: never recommended
 SIMILAR_TTL = 3600
 
 DEFAULT_SETTINGS = {
@@ -242,17 +244,11 @@ CREATE TABLE IF NOT EXISTS watches (
     cursor TEXT NOT NULL DEFAULT '', -- the newest StashDB "updated" time seen
     error TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS favorite_tags (   -- StashDB has no tag favourites: ours, per user
+CREATE TABLE IF NOT EXISTS tag_feelings (   -- StashDB has no tag favourites: ours, per user
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tag_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    created INTEGER NOT NULL,
-    PRIMARY KEY (user_id, tag_id)
-);
-CREATE TABLE IF NOT EXISTS disliked_tags (   -- the same, for tags a user doesn't want to see
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    tag_id TEXT NOT NULL,
-    name TEXT NOT NULL,
+    feeling INTEGER NOT NULL,                -- FEELINGS: 2 love, 1 like, -1 dislike, -2 hate
     created INTEGER NOT NULL,
     PRIMARY KEY (user_id, tag_id)
 );
@@ -288,6 +284,16 @@ class DB:
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in have:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        # Before the five feelings: favourite tags (now liked ones) and, briefly, disliked ones.
+        for old, feeling in (("favorite_tags", 1), ("disliked_tags", -1)):
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                 (old,)).fetchone():
+                with self.conn:
+                    self.conn.execute("BEGIN")
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO tag_feelings(user_id, tag_id, name, feeling, created) "
+                        f"SELECT user_id, tag_id, name, ?, created FROM {old}", (feeling,))
+                    self.conn.execute(f"DROP TABLE {old}")
 
     def all(self, sql, args=()):
         with self.lock:
@@ -1619,45 +1625,44 @@ class App:
             scenes = [sc for sc in scenes if ok(sc)]
         return result, scenes
 
-    # -- favourite tags (Desireerr's own, per user) ------------------------------------
-    def fav_tags(self, user):
-        return self.db.all("SELECT tag_id AS id, name FROM favorite_tags WHERE user_id = ? "
+    # -- tag feelings (Desireerr's own, per user): love, like, dislike, hate ----------------
+    def tag_feelings(self, user):
+        """The user's tags with a feeling (none is neutral), with the feeling's name."""
+        names = {v: k for k, v in FEELINGS.items()}
+        rows = self.db.all("SELECT tag_id AS id, name, feeling FROM tag_feelings WHERE user_id = ? "
                            "ORDER BY name COLLATE NOCASE", (user["id"],))
+        return [dict(r, feeling=names[r["feeling"]]) for r in rows]
+
+    def feelings(self, user):
+        """tag ID -> feeling (2 love ... -2 hate); {} without a user."""
+        if not user:
+            return {}
+        return {r["tag_id"]: r["feeling"] for r in self.db.all(
+            "SELECT tag_id, feeling FROM tag_feelings WHERE user_id = ?", (user["id"],))}
+
+    def fav_tags(self, user):
+        """The favourite tags (a filter on Discover and Scenes): the loved and liked ones."""
+        return [{"id": t["id"], "name": t["name"]} for t in self.tag_feelings(user)
+                if FEELINGS[t["feeling"]] > 0]
 
     def fav_tag_ids(self, user):
         return [t["id"] for t in self.fav_tags(user)]
 
-    def disliked_tags(self, user):
-        return self.db.all("SELECT tag_id AS id, name FROM disliked_tags WHERE user_id = ? "
-                           "ORDER BY name COLLATE NOCASE", (user["id"],))
-
-    def disliked_tag_ids(self, user):
-        return [t["id"] for t in self.disliked_tags(user)]
-
-    def set_fav_tag(self, user, tag_id, favorite):
-        self.set_tag_feeling(user, tag_id, "favorite_tags", favorite)
-        return self.fav_tags(user)
-
-    def set_disliked_tag(self, user, tag_id, disliked):
-        self.set_tag_feeling(user, tag_id, "disliked_tags", disliked)
-        return self.disliked_tags(user)
-
-    def set_tag_feeling(self, user, tag_id, table, on):
-        """Put the tag in TABLE (favorite_tags or disliked_tags) and out of the other one: a
-        tag isn't both. Not ON: just out of TABLE."""
-        other = "disliked_tags" if table == "favorite_tags" else "favorite_tags"
-        if on:
+    def set_tag_feeling(self, user, tag_id, feeling):
+        """FEELING: a FEELINGS name, or "neutral" for none."""
+        if feeling == "neutral":
+            self.db.run("DELETE FROM tag_feelings WHERE user_id = ? AND tag_id = ?", (user["id"], tag_id))
+        else:
             tag = self.stash.find_tag(tag_id)
             if not tag:
                 raise ApiError(404, "StashDB has no tag with that ID.")
-            self.db.run(f"DELETE FROM {other} WHERE user_id = ? AND tag_id = ?", (user["id"], tag_id))
-            self.db.run(f"INSERT OR IGNORE INTO {table}(user_id, tag_id, name, created) "
-                        "VALUES (?,?,?,?)", (user["id"], tag_id, tag["name"], now()))
-        else:
-            self.db.run(f"DELETE FROM {table} WHERE user_id = ? AND tag_id = ?", (user["id"], tag_id))
+            self.db.run("INSERT INTO tag_feelings(user_id, tag_id, name, feeling, created) VALUES (?,?,?,?,?) "
+                        "ON CONFLICT(user_id, tag_id) DO UPDATE SET feeling = excluded.feeling",
+                        (user["id"], tag_id, tag["name"], FEELINGS[feeling], now()))
         # Their saved searches with favourite tags look through the matches again.
         self.db.run("UPDATE watches SET cursor = '' WHERE user_id = ? AND query LIKE '%fav_tags=1%'",
                     (user["id"],))
+        return self.tag_feelings(user)
 
     def scene_tags(self, ids):
         found = self.stash.find_many("findScene", ids, "{ id tags { id } }")
@@ -1680,7 +1685,7 @@ class App:
                 {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC", "favorites": "ALL",
                  "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
              "/scenes?favorites=ALL"),
-            ("favtags", "New with your favourite tags", lambda: self.stash.query_scenes(
+            ("favtags", "New with tags you love or like", lambda: self.stash.query_scenes(
                 {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
                  "tags": {"value": favs, "modifier": "INCLUDES"},
                  "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"] if favs else [],
@@ -1742,13 +1747,14 @@ class App:
         Whisparr follows): SIMILAR_FAV_HERE for each who's in this scene too,
         SIMILAR_FAV_PERFORMER for the others, plus the tag score. Discover: scenes with none
         of them (so never the same scene twice): SIMILAR_PERFORMER for each of this scene's
-        performers, plus the tag score. Tag score, per tag of the other scene: one this
-        scene has too 1, one of the user's favourites 2, both 5, a disliked one -5. A scene
-        with a disliked tag is never with the favourite performers, and in Discover only if
-        its favourite tags outweigh its disliked ones. Both look among StashDB's most popular
-        scenes with this one's tags (its ACTION and SCENE tags, favourites first, never a
-        disliked one; all of the first three, fewer if that finds too little), and among
-        those of the performers that count.
+        performers, plus the tag score: what the other scene's tags add by the user's
+        feeling for them, FEELING_SCORE (a loved one 4, 10 if this scene has it too; liked 2
+        or 5; neutral 0 or 1; disliked -5). A scene with a hated tag is never recommended;
+        one with a disliked tag never with the favourite performers, and in Discover only if
+        its loved and liked tags outweigh its disliked ones. Both look among StashDB's most
+        popular scenes with this one's tags (its ACTION and SCENE tags, loved, then liked
+        ones first, never disliked or hated ones; all of the first three, fewer if that
+        finds too little), and among those of the performers that count.
         Together again: other scenes with two or more of this cast, the most of them first,
         then the newest; they're left out of the other two. Popularity breaks ties.
         """
@@ -1757,11 +1763,10 @@ class App:
             raise ApiError(404, "StashDB has no scene with that ID.")
         tags = scene.get("tags") or []
         mine = {t["id"] for t in tags}
-        fav_tags = set(self.fav_tag_ids(user)) if user else set()
-        disliked = set(self.disliked_tag_ids(user)) if user else set()
+        feel = self.feelings(user)
         action = [t["id"] for t in tags if (t.get("category") or {}).get("group") in ("ACTION", "SCENE")]
-        action = [t for t in action or [t["id"] for t in tags] if t not in disliked]
-        action.sort(key=lambda t: t not in fav_tags)
+        action = [t for t in action or [t["id"] for t in tags] if feel.get(t, 0) >= 0]
+        action.sort(key=lambda t: -feel.get(t, 0))
         cast = list(dict.fromkeys(p["performer"]["id"] for p in scene.get("performers") or []))
         favs = self.favourite_performers()
 
@@ -1837,17 +1842,32 @@ class App:
         except ApiError:
             their_tags = {}
 
+        def weigh(sc):
+            """(what its loved and liked tags add, what its neutral ones add, what its disliked
+            ones take off, whether it has a hated one)"""
+            liked = neutral = disliked = 0
+            for t in set(their_tags.get(sc["id"], ())):
+                f = feel.get(t, 0)
+                if f == FEELINGS["hate"]:
+                    return 0, 0, 0, True
+                points = FEELING_SCORE[f][t in mine]
+                if f > 0:
+                    liked += points
+                elif f < 0:
+                    disliked -= points
+                else:
+                    neutral += points
+            return liked, neutral, disliked, False
+        weights = {sid: weigh(sc) for sid, sc in {**inner, **outer}.items()}
+
         def tag_score(sc):
-            return fav_score(sc) - dislike_score(sc) + len(set(their_tags.get(sc["id"], ())) & mine - fav_tags)
-
-        def fav_score(sc):
-            return sum(5 if t in mine else 2 for t in set(their_tags.get(sc["id"], ())) & fav_tags)
-
-        def dislike_score(sc):
-            return SIMILAR_DISLIKED * len(set(their_tags.get(sc["id"], ())) & disliked)
-
-        inner = {sid: sc for sid, sc in inner.items() if not dislike_score(sc)}
-        outer = {sid: sc for sid, sc in outer.items() if not dislike_score(sc) or fav_score(sc) > dislike_score(sc)}
+            liked, neutral, disliked, _ = weights[sc["id"]]
+            return liked + neutral - disliked
+        def allowed(sid, discover):
+            liked, _, disliked, hated = weights[sid]
+            return not hated and (not disliked or discover and liked > disliked)
+        inner = {sid: sc for sid, sc in inner.items() if allowed(sid, False)}
+        outer = {sid: sc for sid, sc in outer.items() if allowed(sid, True)}
 
         def ranked(found, score):
             order = {sid: n for n, sid in enumerate(found)}
@@ -2457,7 +2477,7 @@ class Handler(BaseHTTPRequestHandler):
                    "whisparr_url": app.whisparr.web_url() if admin_user else None}
             if user:
                 out["fav_tags"] = app.fav_tags(user)
-                out["disliked_tags"] = app.disliked_tags(user)
+                out["tag_feelings"] = app.tag_feelings(user)
                 app.remember_origin(self.origin())
                 app.jellyfin.ensure()
                 if app.jellyfin.creds()[1] and app.jellyfin.server_id:
@@ -2523,18 +2543,13 @@ class Handler(BaseHTTPRequestHandler):
             tag = app.stash.find_tag(parts[1])
             if not tag:
                 raise ApiError(404, "StashDB has no tag with that ID.")
-            return 200, dict(tag, is_favorite=tag["id"] in app.fav_tag_ids(user),
-                             is_disliked=tag["id"] in app.disliked_tag_ids(user)), None
-        if key == ("POST", "favorite-tags"):
+            feeling = {v: k for k, v in FEELINGS.items()}.get(app.feelings(user).get(tag["id"]), "neutral")
+            return 200, dict(tag, feeling=feeling), None
+        if key == ("POST", "tag-feelings"):
             body = self.body_json()
-            if not id_list(body.get("id")):
-                raise ApiError(400, "Favourite takes a tag ID.")
-            return 200, {"tags": app.set_fav_tag(user, body["id"], bool(body.get("favorite")))}, None
-        if key == ("POST", "disliked-tags"):
-            body = self.body_json()
-            if not id_list(body.get("id")):
-                raise ApiError(400, "Dislike takes a tag ID.")
-            return 200, {"tags": app.set_disliked_tag(user, body["id"], bool(body.get("disliked")))}, None
+            if not id_list(body.get("id")) or body.get("feeling") not in (*FEELINGS, "neutral"):
+                raise ApiError(400, "A feeling takes a tag ID and love, like, neutral, dislike or hate.")
+            return 200, {"tags": app.set_tag_feeling(user, body["id"], body["feeling"])}, None
 
         # -- favourites (admins: they're the StashDB account's) --
         if key == ("POST", "favorite"):
