@@ -321,7 +321,8 @@ fragment SceneFull on Scene {
   urls { url site { name } }
   studio { id name parent { id name } }
   tags { id name description category { id name group } }
-  performers { as performer { id name disambiguation gender images { url width height } } }
+  performers { as performer { id name disambiguation gender birth_date death_date
+    images { url width height } } }
 }"""
 
 PERFORMER_CARD = """
@@ -333,7 +334,7 @@ fragment PerformerCard on Performer {
 PERFORMER_FULL = PERFORMER_CARD + """
 fragment PerformerFull on Performer {
   ...PerformerCard
-  aliases birth_date age country ethnicity hair_color eye_color height
+  aliases birth_date death_date age country ethnicity hair_color eye_color height
   cup_size band_size waist_size hip_size breast_type career_start_year career_end_year
   urls { url site { name } }
   tattoos { location description }

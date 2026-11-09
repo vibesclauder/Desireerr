@@ -99,6 +99,31 @@ function localToday() {
   const d = new Date();
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
+// Whole years from BIRTH to WHEN (or today); both as StashDB gives dates ("1990",
+// "1990-05" or "1990-05-03"). "~24" when the dates are too rough to be sure.
+function ageAt(birth, when = localToday()) {
+  if (!birth || !when) return "";
+  const b = birth.split("-").map(Number), w = when.split("-").map(Number);
+  const n = Math.min(b.length, w.length);
+  let years = w[0] - b[0];
+  if (n >= 2 && (w[1] < b[1] || (n === 3 && w[1] === b[1] && w[2] < b[2]))) years--;
+  if (!(years >= 0 && years < 120)) return "";
+  const sure = n === 3 || (n === 2 && w[1] !== b[1]);
+  return (sure ? "" : "~") + years;
+}
+// A cast member's ages: when the scene was made, and now (or when they died).
+function castAges(p, s) {
+  const born = p.birth_date, died = p.death_date;
+  const made = s.production_date || s.release_date;
+  const then = made ? ageAt(born, made) : "", last = ageAt(born, died || undefined);
+  const short = !died && then && then === last ? [`${then} then and now`] : [then && `${then} then`,
+    died ? `† ${died.slice(0, 4)}${last ? ` at ${last}` : ""}` : last && `${last} now`].filter(Boolean);
+  if (!short.length) return "";
+  const long = [born && `Born ${fmtDate(born)}`,
+    then && `${then} ${s.production_date ? "when this was made" : "at its release"}`,
+    died ? `died ${fmtDate(died)}${last ? ` at ${last}` : ""}` : last && `${last} now`].filter(Boolean);
+  return html`<small class="ages${died ? " died" : ""}" title="${long.join(" · ")}">${short.join(" · ")}</small>`;
+}
 function fmtDur(sec) {
   if (!sec) return "";
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -1097,7 +1122,7 @@ async function viewScene(view, id, ctx) {
         ${s.performers?.length ? html`<section class="section"><div class="section-head"><h2>Performers</h2></div>
           <div class="cast">${s.performers.map((p) => {
             const pim = pickImage(p.performer.images, false);
-            return html`<a href="/performer/${p.performer.id}"><div class="face">${pim ? html`<img src="${imgUrl(pim, 240)}" alt="" loading="lazy">` : ""}</div><span>${performerName(p)}${p.as && p.as !== p.performer.name ? html`<small>${p.performer.name}</small>` : p.performer.disambiguation ? html`<small>${p.performer.disambiguation}</small>` : ""}</span></a>`;
+            return html`<a href="/performer/${p.performer.id}"><div class="face">${pim ? html`<img src="${imgUrl(pim, 240)}" alt="" loading="lazy">` : ""}</div><span>${performerName(p)}${p.as && p.as !== p.performer.name ? html`<small>${p.performer.name}</small>` : p.performer.disambiguation ? html`<small>${p.performer.disambiguation}</small>` : ""}${castAges(p.performer, s)}</span></a>`;
           })}</div></section>` : ""}
         ${s.details ? html`<section class="section"><div class="section-head"><h2>About</h2></div><p class="prose">${s.details}</p></section>` : ""}
         ${s.tags?.length ? html`<section class="section"><div class="section-head"><h2>Tags</h2>${similar.length ? html`<a class="more" href="/scenes${qs({ tags: similar, sort: "POPULARITY" })}">More like this${icon("chevron")}</a>` : ""}</div>
@@ -1133,9 +1158,12 @@ async function viewPerformer(view, id, ctx) {
   const back = pickImage(p.images, true);
   const meas = [p.band_size && p.cup_size ? `${p.band_size}${p.cup_size}` : p.cup_size, p.waist_size, p.hip_size].filter(Boolean).join("-");
   const mods = (list) => (list || []).map((m) => [m.location, m.description].filter(Boolean).join(": ")).join(", ");
+  const ageNow = p.death_date ? "" : ageAt(p.birth_date) || p.age || "";
+  const ageEnd = p.death_date ? ageAt(p.birth_date, p.death_date) : "";
   const facts = [
     ["Aliases", (p.aliases || []).join(", ")],
-    ["Born", fmtDate(p.birth_date) + (p.age ? ` (${p.age})` : "")],
+    ["Born", fmtDate(p.birth_date) + (ageNow ? ` (${ageNow})` : "")],
+    ["Died", p.death_date ? fmtDate(p.death_date) + (ageEnd ? ` (aged ${ageEnd})` : "") : ""],
     ["Country", p.country],
     ["Ethnicity", titleCase(p.ethnicity)],
     ["Hair", titleCase(p.hair_color)],
@@ -1157,7 +1185,7 @@ async function viewPerformer(view, id, ctx) {
         : html`<div class="hero-poster portrait">${noImg("users")}</div>`}
         <div class="hero-info">
           <div class="kicker">${[titleCase(p.gender), p.country].filter(Boolean).join(" · ")}${p.is_favorite ? html`<span title="StashDB favourite">${icon("heartFill")}</span>` : ""}</div>
-          <h1>${p.name}</h1>
+          <h1>${p.name}${p.death_date ? html` <span class="dagger" title="Died ${fmtDate(p.death_date)}">†</span>` : ""}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
           <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
