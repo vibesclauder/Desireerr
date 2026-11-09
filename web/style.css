@@ -220,6 +220,18 @@ button.chip { cursor: pointer; }
 .chip.feel-dislike { opacity: .6; }
 .chip.feel-hate { opacity: .5; text-decoration: line-through; text-decoration-color: rgba(252,165,165,.6); color: #fca5a5; }
 .seg.feelings { flex-wrap: wrap; }
+.tagchip { display: inline-flex; align-items: center; border-radius: 99px; }
+.tagchip.open { background: var(--surface-3); box-shadow: 0 0 0 1px var(--accent-hi); }
+.tagchip.open > .chip { border-color: transparent; background: transparent; }
+.tagchip.busy { opacity: .6; }
+.chip-tools { display: inline-flex; align-items: center; gap: 1px; padding-right: 4px; }
+.chip-tools button { width: 26px; height: 26px; border-radius: 99px; border: 0; padding: 0; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.chip-tools button:hover, .chip-tools button:focus-visible { background: rgba(255,255,255,.08); color: var(--fg); }
+.chip-tools button.on { background: rgba(225,29,72,.16); color: var(--accent-hi); }
+.chip-tools button.on.feel-neutral { background: rgba(255,255,255,.1); color: var(--fg); }
+.chip-tools button.on.feel-dislike, .chip-tools button.on.feel-hate { background: rgba(239,68,68,.14); color: #fca5a5; }
+.chip-tools svg { width: 15px; height: 15px; }
+.chip-tools .sep { width: 1px; height: 16px; background: var(--line); margin: 0 3px; }
 .seg.feelings button { display: inline-flex; align-items: center; gap: 5px; }
 .seg.feelings svg { width: 14px; height: 14px; }
 .seg.feelings button.feel-love, .seg.feelings button.feel-like { color: var(--accent-hi); }

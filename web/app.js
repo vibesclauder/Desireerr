@@ -139,14 +139,75 @@ function fmtAgo(ts) {
 }
 const titleCase = (s) => (s || "").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const performerName = (p) => p.as || p.performer?.name || "";
-// Favourite tags are Desireerr's own (StashDB has none), per user; status carries them.
-// A user's feeling for a tag (neutral without one), and how a tag chip shows it.
+// Tag feelings are Desireerr's own (StashDB has none), per user; status carries them.
+// A user's feeling for a tag (neutral without one), and how a tag chip shows it. Clicking a
+// chip opens it (one at a time): the five feelings to pick from, and a magnifier to the tag's
+// page. A middle or Ctrl click still opens the page.
 const FEELINGS = [["hate", "Hate", "ban"], ["dislike", "Dislike", "thumbDown"], ["neutral", "Neutral", ""], ["like", "Like", "heart"], ["love", "Love", "heartFill"]];
 const feelingOf = (id) => (status.tag_feelings || []).find((t) => t.id === id)?.feeling || "neutral";
+const feelingIcon = (f) => FEELINGS.find(([k]) => k === f)[2];
+const chipTitle = (f, t) => f === "neutral" ? t.description || "" : `You ${f} this tag`;
 const tagChip = (t, extra = "") => {
-  const f = feelingOf(t.id), ic = FEELINGS.find(([k]) => k === f)[2];
-  return html`<a class="chip feel-${f}" href="/tag/${t.id}" title="${f === "neutral" ? t.description || "" : `You ${f} this tag`}">${ic ? icon(ic) : ""}${t.name}${extra}</a>`;
+  const f = feelingOf(t.id), ic = feelingIcon(f);
+  return html`<span class="tagchip" data-tag="${t.id}"><a class="chip feel-${f}" href="/tag/${t.id}" title="${chipTitle(f, t)}" data-desc="${t.description || ""}">${ic ? icon(ic) : ""}${t.name}${extra}</a></span>`;
 };
+let openChip = null;
+function closeChip() {
+  if (!openChip) return;
+  openChip.classList.remove("open");
+  $(".chip-tools", openChip)?.remove();
+  openChip = null;
+}
+function openTagChip(w) {
+  closeChip();
+  const f = feelingOf(w.dataset.tag);
+  w.insertAdjacentHTML("beforeend", html`<span class="chip-tools" role="group" aria-label="How you feel about this tag">${FEELINGS.map(([k, label, ic]) => html`<button type="button" data-feel="${k}" class="${k === f ? `on feel-${k}` : ""}" title="${label}" aria-label="${label}" aria-pressed="${k === f}">${icon(ic || "neutral")}</button>`)}<i class="sep"></i><button type="button" data-open title="Open the tag: its scenes" aria-label="Open the tag">${icon("search")}</button></span>`.s);
+  w.classList.add("open");
+  openChip = w;
+}
+// Every chip of the tag on the page shows the new feeling; nothing else moves.
+function showFeeling(id) {
+  const f = feelingOf(id), ic = feelingIcon(f);
+  for (const w of $$(`.tagchip[data-tag="${CSS.escape(id)}"]`)) {
+    const a = $("a.chip", w);
+    a.className = `chip feel-${f}`;
+    a.title = chipTitle(f, { description: a.dataset.desc });
+    if (a.firstElementChild?.tagName === "svg") a.firstElementChild.remove();
+    if (ic) a.insertAdjacentHTML("afterbegin", icon(ic).s);
+    for (const b of $$(".chip-tools [data-feel]", w)) {
+      const on = b.dataset.feel === f;
+      b.className = on ? `on feel-${f}` : "";
+      b.setAttribute("aria-pressed", on);
+    }
+  }
+}
+document.addEventListener("click", async (e) => {
+  const w = e.target.closest(".tagchip");
+  if (!w) { closeChip(); return; }
+  if (e.target.closest("a.chip")) {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    if (w === openChip) closeChip(); else openTagChip(w);
+    return;
+  }
+  const b = e.target.closest(".chip-tools button");
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const id = w.dataset.tag;
+  if (b.hasAttribute("data-open")) { closeChip(); go(`/tag/${id}`); return; }
+  if (b.classList.contains("on") || w.classList.contains("busy")) return;
+  w.classList.add("busy");
+  try {
+    const r = await api("tag-feelings", { method: "POST", body: { id, feeling: b.dataset.feel } });
+    status.tag_feelings = r.tags;
+    status.fav_tags = r.tags.filter((t) => t.feeling === "love" || t.feeling === "like").map(({ id, name }) => ({ id, name }));
+    showFeeling(id);
+  } catch (err) {
+    if (err.status !== 401) toast(err.message, true);
+  } finally { w.classList.remove("busy"); }
+}, true);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeChip(); });
 
 // ---------------------------------------------------------------------------------------
 // Icons
@@ -169,6 +230,7 @@ const ICONS = {
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   download: '<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>',
   heart: '<path d="M12 20.5C6 16.8 3 13.3 3 9.6 3 6.9 5.1 5 7.6 5c1.9 0 3.4 1 4.4 2.6C13 6 14.5 5 16.4 5 18.9 5 21 6.9 21 9.6c0 3.7-3 7.2-9 10.9z"/>',
+  neutral: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
   ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
   thumbDown: '<path d="M17 3v11M17 3h3v11h-3M17 14l-4.2 7a2.4 2.4 0 0 1-2.3-2.4V15H5.3a2 2 0 0 1-2-2.3l1.2-7.6a2 2 0 0 1 2-1.6H17"/>',
   heartFill: '<path fill="currentColor" stroke="none" d="M12 20.5C6 16.8 3 13.3 3 9.6 3 6.9 5.1 5 7.6 5c1.9 0 3.4 1 4.4 2.6C13 6 14.5 5 16.4 5 18.9 5 21 6.9 21 9.6c0 3.7-3 7.2-9 10.9z"/>',
@@ -1281,7 +1343,7 @@ async function viewTags(view, ctx) {
   const byGroup = {};
   for (const c of categories) (byGroup[c.group] ||= []).push(c);
   view.innerHTML = html`<div class="page">
-    <div class="page-title"><h1>Tags</h1><span class="sub">Pick a tag to see its scenes, then add more tags to combine them.</span></div>
+    <div class="page-title"><h1>Tags</h1><span class="sub">Click a tag to say how you feel about it; its magnifier opens its scenes, where you can add more tags to combine them.</span></div>
     ${[["love", "Tags you love"], ["like", "Tags you like"], ["dislike", "Tags you dislike"], ["hate", "Tags you hate"]].map(([k, title]) => {
       const ts = (status.tag_feelings || []).filter((t) => t.feeling === k);
       return ts.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>${title}</h2>${k === "love" || (k === "like" && !status.tag_feelings.some((t) => t.feeling === "love")) ? html`<a class="more" href="/scenes?fav_tags=1">Scenes with any you love or like${icon("chevron")}</a>` : ""}</div>

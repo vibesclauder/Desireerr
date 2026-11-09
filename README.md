@@ -102,8 +102,8 @@ On a phone, open it and "Add to home screen" for an app icon.
   Scenes page's Favourites filter, "favourites only" on Performers and Studios, and saved
   searches. Nothing is downloaded for them. (Whisparr's own StashDB import list, if you
   switch it on, does add favourites to Whisparr, with their whole back catalogue.)
-- **Tag feelings** (anyone, on a tag's page): love, like, neutral (the default), dislike or
-  hate. StashDB has none, so Desireerr keeps them, per user. They weigh in the reels under a
+- **Tag feelings** (anyone): love, like, neutral (the default), dislike or hate. Click any tag
+  to pick one right there (its magnifier opens the tag's scenes), or use the tag's page. StashDB has none, so Desireerr keeps them, per user. They weigh in the reels under a
   scene (above), and the tags you love or like are your favourite tags: a filter, "With any
   of the tags I love or like" on Scenes (and saved searches, which use them as they are at
   each check), a Discover row, and the top of the Tags page. Wherever tags are listed, they
