@@ -91,8 +91,8 @@ RARITY_TYPICAL = 30000
 RARITY_MIN, RARITY_MAX = 0.25, 3.0
 TAG_COUNT_TTL = 7 * 86400
 # Performers in the taste score, by the user's feeling for them (FEELINGS, as for tags; a hated
-# one: never recommended). Without one, a favourite or followed performer counts as liked, and one
-# whose scenes they requested up to that, by how many and how lately (half after
+# one: never recommended). Without one, a followed performer counts as liked, and one whose
+# scenes they requested up to that, by how many and how lately (half after
 # AFFINITY_HALF_LIFE). Several add up, unless the video is cut together from several scenes
 # (MULTI_SCENE_TAGS): then only the best and the worst.
 PERFORMER_SCORE = {2: 8, 1: 4, -1: -4}
@@ -2114,27 +2114,58 @@ class App:
                          for key, title, sub, scenes in rows if scenes]}
 
     def favourite_performers(self, user=None):
-        """The inner circle: StashDB's favourite performers, the ones the user follows and the
-        ones they love or like, but not the ones they dislike or hate."""
+        """The inner circle: the performers the user loves, likes or follows, but not the ones
+        they dislike or hate. (StashDB's favourites aren't read: loving or liking makes them,
+        see set_performer_feeling.)"""
         if not user:
-            return self.stash_favourites()
+            return set()
         feel = self.performer_feelings(user)
-        ids = {f["id"] for f in self.follows(user, "performer")} | self.stash_favourites()
+        ids = {f["id"] for f in self.follows(user, "performer")}
         return (ids | {p for p, f in feel.items() if f > 0}) - {p for p, f in feel.items() if f < 0}
 
-    def stash_favourites(self):
-        """StashDB's favourite performers' IDs (none if it can't say)."""
-        ids = set()
-        try:
-            for page in range(1, 4):
-                res = self.stash.query_performers({"page": page, "per_page": 100, "sort": "NAME",
-                                                   "direction": "ASC", "is_favorite": True})
-                ids.update(p["id"] for p in res["performers"])
-                if page * 100 >= res["count"]:
-                    break
-        except ApiError as e:
-            print(f"favourite performers: {e.message}", file=sys.stderr, flush=True)
-        return ids
+    def stash_favourite_ids(self):
+        """The StashDB account's favourite performers: {ID: name}."""
+        found = {}
+        for page in range(1, 11):
+            res = self.stash.query_performers({"page": page, "per_page": 100, "sort": "NAME",
+                                               "direction": "ASC", "is_favorite": True})
+            found.update((p["id"], p.get("name") or p["id"]) for p in res["performers"])
+            if page * 100 >= res["count"]:
+                break
+        return found
+
+    def sync_stash_favourites(self):
+        """Once: make the StashDB account's favourite performers the ones an admin loves or likes
+        (as set_performer_feeling keeps them from then on). Returns how many changed."""
+        if self.db.setting("favourites_synced") or not self.db.setting("favourites_imported"):
+            return 0
+        have = set(self.stash_favourite_ids())
+        want = {r["performer_id"] for r in self.db.all(
+            "SELECT DISTINCT f.performer_id FROM performer_feelings f JOIN users u ON u.id = f.user_id "
+            "WHERE f.feeling > 0 AND u.is_admin = 1")}
+        for pid in sorted(want - have):
+            self.stash.set_favorite("performer", pid, True)
+        for pid in sorted(have - want):
+            self.stash.set_favorite("performer", pid, False)
+        self.db.set_settings({"favourites_synced": "1"})
+        return len(want ^ have)
+
+    def import_stash_favourites(self):
+        """Once: StashDB's favourite performers become the first admin's liked ones (from then
+        on, an admin loving or liking a performer makes them one there, and Desireerr reads them
+        no more). Returns how many."""
+        if self.db.setting("favourites_imported"):
+            return 0
+        admin = self.db.one("SELECT id FROM users WHERE is_admin = 1 ORDER BY id LIMIT 1")
+        if not admin:
+            return 0
+        found = self.stash_favourite_ids()
+        for pid, name in found.items():
+            self.db.run("INSERT OR IGNORE INTO performer_feelings(user_id, performer_id, name, feeling, created) "
+                        "VALUES (?, ?, ?, ?, ?)", (admin["id"], pid, name, FEELINGS["like"], now()))
+        self.db.set_settings({"favourites_imported": "1"})
+        self.forget_discover()
+        return len(found)
 
     def performer(self, pid, user):
         perf = self.stash.find_performer(pid)
@@ -2159,7 +2190,9 @@ class App:
         return {r["performer_id"]: r["feeling"] for r in rows}
 
     def set_performer_feeling(self, user, pid, feeling):
-        """FEELING: a FEELINGS name, or "neutral" for none."""
+        """FEELING: a FEELINGS name, or "neutral" for none. An admin's also makes the performer a
+        favourite on the StashDB account, or not, for other tools that read it: they are one while
+        any admin loves or likes them. Returns the feeling, and "stashdb": what went wrong there."""
         if feeling == "neutral":
             self.db.run("DELETE FROM performer_feelings WHERE user_id = ? AND performer_id = ?", (user["id"], pid))
         else:
@@ -2169,7 +2202,16 @@ class App:
             self.db.run("INSERT OR REPLACE INTO performer_feelings(user_id, performer_id, name, feeling, created) "
                         "VALUES (?, ?, ?, ?, ?)", (user["id"], pid, found["name"], FEELINGS[feeling], now()))
         self.forget_discover(user)
-        return {"feeling": feeling}
+        out = {"feeling": feeling}
+        if user.get("is_admin"):
+            fav = bool(self.db.one(
+                "SELECT 1 FROM performer_feelings f JOIN users u ON u.id = f.user_id "
+                "WHERE f.performer_id = ? AND f.feeling > 0 AND u.is_admin = 1", (pid,)))
+            try:
+                self.stash.set_favorite("performer", pid, fav)
+            except ApiError as e:
+                out["stashdb"] = e.message
+        return out
 
     def learned_performers(self, user, at=None):
         """Performer ID -> how much the user likes them by the scenes they requested themselves
@@ -2196,12 +2238,11 @@ class App:
 
     def performer_taste(self, user):
         """Performer ID -> (points, why) for the user's taste: by their feeling for them,
-        PERFORMER_SCORE (a hated one None); without one, favourites and followed ones as liked
+        PERFORMER_SCORE (a hated one None); without one, followed ones as liked
         (PERFORMER_POINTS), the ones they requested scenes of up to that (learned_performers)."""
         if not user:
             return {}
         out = {p: (round(PERFORMER_POINTS * a, 1), "requested") for p, a in self.learned_performers(user).items()}
-        out.update((p, (PERFORMER_POINTS, "favourite")) for p in self.stash_favourites())
         out.update((f["id"], (PERFORMER_POINTS, "followed")) for f in self.follows(user, "performer"))
         names = {v: k for k, v in FEELINGS.items()}
         out.update((p, (PERFORMER_SCORE.get(f), names[f])) for p, f in self.performer_feelings(user).items())
@@ -3100,6 +3141,17 @@ def refresher(app):
             app.whisparr.error = e.message
         except Exception as e:
             print(f"refresh failed: {e!r}", file=sys.stderr, flush=True)
+        try:
+            if app.import_stash_favourites():
+                print("StashDB's favourite performers are liked now", file=sys.stderr, flush=True)
+            changed = app.sync_stash_favourites()
+            if changed:
+                print(f"StashDB's favourite performers follow the admins' feelings: {changed} changed",
+                      file=sys.stderr, flush=True)
+        except ApiError as e:
+            print(f"favourites: {e.message}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"favourites failed: {e!r}", file=sys.stderr, flush=True)
         try:
             app.sync_nfos()
         except ApiError as e:

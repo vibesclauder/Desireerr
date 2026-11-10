@@ -5,7 +5,7 @@ database of porn scenes, performers and studios, on top of
 [Whisparr](https://github.com/Whisparr/Whisparr) v3, the *arr for adult content (Radarr for
 porn). Browse and search StashDB, filter scenes
 by tags (all of them, any of them, or leave some out), performers, studios, dates and your
-StashDB favourites, then request scenes. Approved requests go to Whisparr, which searches
+favourites, then request scenes. Approved requests go to Whisparr, which searches
 Prowlarr and downloads them; each scene shows whether it's pending, requested, downloading
 or available.
 
@@ -13,7 +13,7 @@ or available.
   a plain JavaScript single-page app with no build step.
 - **Everything is behind the login.** Covers are fetched through the server and cached, so
   the browser only talks to Desireerr. Covers can be blurred, and the tab title is a setting.
-- **Users and approvals.** Admins approve requests, set favourites and change settings. Other users' requests wait for approval unless they're auto-approved.
+- **Users and approvals.** Admins approve requests, set favourite studios and change settings. Other users' requests wait for approval unless they're auto-approved.
 - **Saved searches.** Any filter on the Scenes page (tags in and out, performers, studios,
   favourites) can request its new scenes every hour. Following a performer or studio is one
   too, so every request is made, and shown, in Desireerr.
@@ -22,8 +22,8 @@ or available.
   hour (sooner if your feelings, favourites or follows change); Reload asks again now.
 - **Scene pages.** The cast with their ages then and now (and a † for those who died), and
   reels at the bottom:
-  - *Similar scenes with favourite performers*: scenes with your StashDB favourites or the
-    performers you follow. Each of them counts 10, or 25 if they're in this scene too.
+  - *Similar scenes with favourite performers*: scenes with the performers you love, like or
+    follow. Each of them counts 10, or 25 if they're in this scene too.
   - *Discover similar scenes*: scenes with none of them, so the two reels never overlap. Each
     of this scene's performers in them counts 5.
   - *Together again*: other scenes with two or more of this cast, the most of them first.
@@ -105,12 +105,18 @@ On a phone, open it and "Add to home screen" for an app icon.
   catalogue), it's monitored; otherwise it's added by its StashDB ID with the
   quality profile and folder from Settings. Then Whisparr searches for it right away, unless
   that's switched off in Settings (then only the RSS feed can grab it).
-- **Favourite a performer or studio** (admins, the heart): saved on your StashDB account, and
-  nothing else. Favourites are a filter: the Scenes page's Favourites filter, "favourites
-  only" on Performers and Studios, and saved searches. Favourite performers, with those
-  you follow, make Discover's "New scenes with favourite performers" (none with a tag
-  you hate or dislike) and the reel of them under a scene. Nothing is downloaded for them. (Whisparr's own StashDB import list, if you
-  switch it on, does add favourites to Whisparr, with their whole back catalogue.)
+- **Favourite performers are the ones you love or like** (below), each user their own, plus
+  those you follow. They make Discover's "New scenes with favourite performers" (none with a
+  tag you hate or dislike) and the reel of them under a scene. Nothing is downloaded for them.
+  Desireerr doesn't read StashDB's favourite performers: the first time it runs, the ones
+  there become the first admin's liked performers, and from then on a performer an admin
+  loves or likes becomes a favourite on the StashDB account (and stops being one when no
+  admin does), for other tools that read it. (Whisparr's own StashDB import list, if you
+  switch it on, adds them to Whisparr, with their whole back catalogue.) The Scenes page's
+  "Loved or liked performers" filter and "Loved or liked only" on Performers use that StashDB
+  list, so they show the admins' (for one admin, their own).
+- **Favourite a studio** (admins, the heart): saved on your StashDB account, and nothing else:
+  a filter on Scenes and Studios, and for saved searches.
 - **Tag feelings** (anyone): love, like, neutral (the default), dislike or hate. Click any tag
   to pick one right there (its magnifier opens the tag's scenes), or use the tag's page.
   StashDB has none, so Desireerr keeps them, per user. They weigh in the reels under a scene
@@ -121,11 +127,10 @@ On a phone, open it and "Add to home screen" for an app icon.
   one 2 (times its rarity, see Scene pages), a disliked one -5, and a ban sign for a hated one;
   and what its performers add, by how you feel about them (on their page, the same five
   feelings): loved 8, liked 4, disliked -4 (nothing hidden: for someone in everything you don't
-  care for), hated never recommended. Without a feeling, a favourite or one you follow counts as
+  care for), hated never recommended. Without a feeling, one you follow counts as
   liked, and one whose scenes you request up to that (0.29 of it after one request, 0.65 after
   three; a request counts half after a year, so those fade). Loved and liked performers are
-  favourites too: in the reel under a scene and Discover's row; disliked and hated ones aren't,
-  even StashDB favourites. Performers add up, except in a video cut together from several scenes
+  favourites; disliked and hated ones aren't, even if you follow them. Performers add up, except in a video cut together from several scenes
   (StashDB's Compilation or Multiple Scenes tag), where only the best and the worst count. A
   scene's page lists the tags and performers that make it; the Performers page, yours. Sort by *Your taste* to see the newest 500 scenes
   that match the filters, best first; a performer's page does that to start with (Settings,

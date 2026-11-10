@@ -558,7 +558,8 @@ function personCard(p) {
   const im = pickImage(p.images, false) || p.image;
   return html`<a class="card person-card" href="/performer/${p.id}">
     <div class="thumb">${im ? html`<img src="${imgUrl(im, 400)}" alt="" loading="lazy" decoding="async">` : noImg("users")}</div>
-    ${p.is_favorite || p.followed ? html`<span class="fav" title="${p.followed ? "Followed" : "StashDB favourite"}">${icon("heartFill")}</span>` : ""}
+    ${feelingIcon(performerFeeling(p.id)) ? html`<span class="fav feel-${performerFeeling(p.id)}" title="You ${performerFeeling(p.id)} them">${icon(feelingIcon(performerFeeling(p.id)))}</span>`
+      : p.followed ? html`<span class="fav" title="Followed">${icon("bell")}</span>` : ""}
     <div class="name">${p.name}${p.disambiguation ? html`<small>${p.disambiguation}</small>` : p.scene_count ? html`<small>${p.scene_count} scenes</small>` : ""}</div>
   </a>`;
 }
@@ -664,12 +665,13 @@ document.addEventListener("click", async (e) => {
     } else if (act === "favorite") {
       const fav = b.dataset.favorite === "1";
       await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
-      toast(fav ? "Added to your StashDB favourites. Nothing is downloaded for it; use them as a filter." : "Removed from your StashDB favourites.");
+      toast(fav ? "A favourite studio: a filter on Scenes and Studios. Nothing is downloaded for it." : "Not a favourite any more.");
       render();
     } else if (act === "pfeeling") {
       const f = b.dataset.feeling;
-      await api("performer-feelings", { method: "POST", body: { id: b.dataset.id, feeling: f } });
-      toast({
+      const r = await api("performer-feelings", { method: "POST", body: { id: b.dataset.id, feeling: f } });
+      if (r.stashdb) toast(`Saved, but StashDB's favourites didn't follow: ${r.stashdb}`, true);
+      else toast({
         love: "Loved: +8 to your taste for each of their scenes, and one of your favourite performers.",
         like: "Liked: +4 to your taste for each of their scenes, and one of your favourite performers.",
         neutral: "Neutral: as a favourite, followed or requested performer, if they're one, else nothing.",
@@ -816,8 +818,8 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
         <label class="field"><span>Sort</span><select class="input" id="f-sort">${SORTS.map(([v, l]) => html`<option value="${v}" ${v === `${f.sort}:${f.dir}` ? "selected" : ""}>${l}</option>`)}</select></label>
         <label class="field"><span>Favourites</span><select class="input" id="f-fav">
           <option value="">All scenes</option>
-          <option value="ALL" ${f.favorites === "ALL" ? "selected" : ""}>Favourite performers or studios</option>
-          <option value="PERFORMER" ${f.favorites === "PERFORMER" ? "selected" : ""}>Favourite performers</option>
+          <option value="ALL" ${f.favorites === "ALL" ? "selected" : ""}>Loved or liked performers, or favourite studios</option>
+          <option value="PERFORMER" ${f.favorites === "PERFORMER" ? "selected" : ""}>Loved or liked performers</option>
           <option value="STUDIO" ${f.favorites === "STUDIO" ? "selected" : ""}>Favourite studios</option>
         </select></label>
       </div>
@@ -899,7 +901,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
     if (f.fav_tags) parts.push("tags I love or like");
     if (perf.length) parts.push(nm(perf).join(" & "));
     if (studios.length) parts.push(nm(studios).join(" or ") + (fixed.studios && f.sub_studios ? " (with sub-studios)" : ""));
-    if (f.favorites) parts.push({ ALL: "StashDB favourites", PERFORMER: "Favourite performers", STUDIO: "Favourite studios" }[f.favorites]);
+    if (f.favorites) parts.push({ ALL: "Loved or liked performers or favourite studios", PERFORMER: "Loved or liked performers", STUDIO: "Favourite studios" }[f.favorites]);
     if (f.q) parts.push(`“${f.q}”`);
     if (labels.not_tags.length) parts.push("not " + nm(labels.not_tags).join(", "));
     return parts.join(" · ");
@@ -1281,8 +1283,8 @@ async function similarScenes(el, id, ctx) {
 function favoriteButton(kind, item) {
   if (!me.is_admin) return "";
   return item.is_favorite
-    ? html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="0" title="Remove from your StashDB favourites">${icon("heartFill")}Favourite</button>`
-    : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="Add to your StashDB favourites: a filter on Discover, Scenes and the lists. Nothing is downloaded for it.">${icon("heart")}Add to favourites</button>`;
+    ? html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="0" title="Not a favourite any more">${icon("heartFill")}Favourite</button>`
+    : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="A favourite: a filter on Scenes and the lists. Nothing is downloaded for it.">${icon("heart")}Add to favourites</button>`;
 }
 
 // How you feel about a performer: love 8, like 4, dislike -4 to your taste; hate: never recommended.
@@ -1333,11 +1335,11 @@ async function viewPerformer(view, id, ctx) {
           <img src="${imgUrl(im, 800)}" alt="">${photos.length > 1 ? html`<span class="photo-count">${icon("photos")}${photos.length}</span>` : ""}</button>`
         : html`<div class="hero-poster portrait">${noImg("users")}</div>`}
         <div class="hero-info">
-          <div class="kicker">${[titleCase(p.gender), p.country].filter(Boolean).join(" · ")}${p.is_favorite ? html`<span title="StashDB favourite">${icon("heartFill")}</span>` : ""}</div>
+          <div class="kicker">${[titleCase(p.gender), p.country].filter(Boolean).join(" · ")}</div>
           <h1>${p.name}${p.death_date ? html` <span class="dagger" title="Died ${fmtDate(p.death_date)}">†</span>` : ""}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
-          <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
+          <div class="btns">${followButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
           <div>${performerFeelings(p)}</div>
         </div>
       </div>
@@ -1366,7 +1368,7 @@ async function viewStudio(view, id, ctx) {
       <div class="hero-body">
         <div class="hero-poster logo">${im ? html`<img src="${imgUrl(im)}" alt="">` : noImg("building")}</div>
         <div class="hero-info">
-          <div class="kicker">${s.parent ? html`<a href="/studio/${s.parent.id}">${s.parent.name}</a>` : "Studio"}${s.is_favorite ? html`<span title="StashDB favourite">${icon("heartFill")}</span>` : ""}</div>
+          <div class="kicker">${s.parent ? html`<a href="/studio/${s.parent.id}">${s.parent.name}</a>` : "Studio"}${s.is_favorite ? html`<span title="Favourite">${icon("heartFill")}</span>` : ""}</div>
           <h1>${s.name}</h1>
           ${s.follow?.followed ? html`<div class="facts"><span>Following${s.follow.since ? ` since ${fmtDate(s.follow.since)}` : ""}</span></div>` : ""}
           <div class="btns">${followButton("studio", s)}${favoriteButton("studio", s)}<a class="btn ghost" href="${s.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a>${site ? html`<a class="btn ghost" href="${site.url}" target="_blank" rel="noreferrer">${icon("external")}Website</a>` : ""}</div>
@@ -1542,7 +1544,7 @@ async function viewPerformers(view, ctx) {
       <label class="field grow"><span>Name</span><input class="input" type="search" name="q" value="${f.q}" placeholder="Name or alias"></label>
       <label class="field"><span>Sort</span><select class="input" name="sort">${[["POPULARITY", "Most popular"], ["SCENE_COUNT", "Most scenes"], ["LAST_SCENE", "Latest scene"], ["DEBUT", "Newest debut"], ["CREATED_AT", "Newly added to StashDB"], ["NAME", "Name"]].map(([v, l]) => option(v, l, f.sort))}</select></label>
       <label class="field"><span>Gender</span><select class="input" name="gender">${[["ANY", "Any"], ["FEMALE", "Female"], ["MALE", "Male"], ["TRANSGENDER_FEMALE", "Trans female"], ["TRANSGENDER_MALE", "Trans male"], ["NON_BINARY", "Non-binary"], ["INTERSEX", "Intersex"]].map(([v, l]) => option(v, l, f.gender))}</select></label>
-      <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="favorites" ${f.favorites ? "checked" : ""}> StashDB favourites only</label>`,
+      <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="favorites" ${f.favorites ? "checked" : ""}> Loved or liked only</label>`,
   });
 }
 
@@ -1554,7 +1556,7 @@ async function viewStudios(view, ctx) {
     controls: (f) => html`
       <label class="field grow"><span>Name</span><input class="input" type="search" name="q" value="${f.q}" placeholder="Studio or network"></label>
       <label class="field"><span>Sort</span><select class="input" name="sort">${[["NAME", "Name"], ["CREATED_AT", "Newly added to StashDB"]].map(([v, l]) => option(v, l, f.sort))}</select></label>
-      <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="favorites" ${f.favorites ? "checked" : ""}> StashDB favourites only</label>
+      <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="favorites" ${f.favorites ? "checked" : ""}> Favourites only</label>
       <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="top" ${f.top ? "checked" : ""}> Networks only</label>`,
   });
 }
@@ -1703,7 +1705,7 @@ async function viewSettings(view, ctx) {
   if (me.is_admin) {
     parts.push(html`<section class="panel">
       <h2>StashDB</h2>
-      <p class="lede">Scenes, performers, studios and tags come from StashDB. The API key is on your stashdb.org profile page; your StashDB favourites show up on Discover.</p>
+      <p class="lede">Scenes, performers, studios and tags come from StashDB. The API key is on your stashdb.org profile page. Performers an admin loves or likes become favourites on that account, for other tools that read it.</p>
       <form class="form-grid" id="sd-form">
         <label class="field" style="grid-column:1/-1"><span>API key</span><input class="input" name="stashdb_key" type="password" autocomplete="off" placeholder="${s.stashdb_key_set ? "Saved. Paste a new one to replace it." : "Paste your StashDB API key"}"></label>
         <div class="btns"><button class="btn primary">Save key</button><span class="note ${s.stashdb_key_set ? "ok-text" : "bad-text"}">${s.stashdb_key_set ? "A key is saved." : "No key yet: browsing won't work until you add one."}</span></div>

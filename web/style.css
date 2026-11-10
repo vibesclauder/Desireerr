@@ -186,6 +186,7 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .person-card .name small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
 .person-card .fav { position: absolute; top: 8px; right: 8px; color: var(--accent-hi); filter: drop-shadow(0 1px 3px rgba(0,0,0,.7)); }
 .person-card .fav svg { width: 18px; height: 18px; }
+.person-card .fav.feel-dislike, .person-card .fav.feel-hate { color: #fca5a5; }
 
 .studio-card .thumb { aspect-ratio: 16 / 9; background: radial-gradient(120% 120% at 50% 0%, var(--surface-3), var(--surface-2)); display: grid; place-items: center; }
 .studio-card .thumb img { width: 78%; height: 62%; object-fit: contain; }

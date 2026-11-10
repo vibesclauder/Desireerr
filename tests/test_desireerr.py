@@ -457,7 +457,8 @@ class Similar(unittest.TestCase):
         stash.scenes[SCENE] = sc
         stash.tags = {}
         self.listed, self.pairs, self.queries = [], {}, []  # StashDB's answer to every search
-        self.favs = ["w1"]                                                  # StashDB favourites
+        self.favs = ["w1"]                                                  # liked performers
+        self.app.performer_feelings = lambda user, named=False: {p: 1 for p in self.favs} if user else {}
         self.followed = ["f2", "f3"]                                         # the user follows
         self.app.follows = lambda user, kind=None: [
             {"kind": "performer", "id": i, "name": i, "since": "2026-11-01", "watch_id": 0}
@@ -559,7 +560,8 @@ class Similar(unittest.TestCase):
         rows = self.rows()
         self.assertEqual(rows["inner"], ["x2"])            # never with the favourites
         self.assertEqual(rows["discover"], ["y3", "y4"])  # y3: 5 + 2 > 5, so 2; y2: 5, not more
-        self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4", "y1"])  # not for nobody
+        # nobody's: no feelings, no favourites (w1, here too: 5 each)
+        self.assertEqual(self.rows(None)["discover"], ["x2", "x1", "y2", "y3", "y4", "y1"])
 
     def test_disliked_tags_are_not_searched_for(self):
         self.feel = {"A": 1, "D": 1, "B": -1, "C": -2}
@@ -1344,13 +1346,15 @@ class Taste(Base):
             {"kind": "tag", "id": "meh", "name": "Meh", "feeling": "dislike", "points": -5},
             {"kind": "tag", "id": "love", "name": "Loved", "feeling": "love", "points": 4}])
         self.assertNotIn("taste", self.app.scene("s2", self.admin))
-        self.app.stash.favourites = ["p1"]
+        self.app.stash.find_performer = lambda pid: {"id": pid, "name": "Ann"}
+        self.app.stash.set_favorite = lambda *a: None
+        self.app.set_performer_feeling(self.admin, "p1", "like")
         sc["performers"] = [{"as": None, "performer": {"id": "p1", "name": "Ann"}}]
-        got = self.app.scene("s2", self.user)
-        self.assertEqual(got["taste"], 3)
-        self.assertIn({"kind": "performer", "id": "p1", "name": "Ann", "why": "favourite", "points": 4},
-                      got["taste_parts"])
-        self.assertEqual(self.app.scene("s2", self.admin)["taste"], 4)   # a favourite: everyone's
+        self.assertNotIn("taste", self.app.scene("s2", self.user)["taste_parts"][0])
+        self.assertEqual(self.app.scene("s2", self.user)["taste"], -1)    # the admin's, not theirs
+        got = self.app.scene("s2", self.admin)
+        self.assertEqual(got["taste"], 4)
+        self.assertEqual(got["taste_parts"], [{"kind": "performer", "id": "p1", "name": "Ann", "why": "like", "points": 4}])
 
     def people(self, *ids, tags=()):
         return {"id": "c", "performers": [{"as": None, "performer": {"id": i}} for i in ids],
@@ -1358,30 +1362,68 @@ class Taste(Base):
 
     def test_performers(self):
         app = self.app
-        app.stash.favourites = ["fav"]
+        app.stash.favourites = ["fav"]                                  # StashDB's: not read
         app.stash.find_performer = lambda pid: {"id": pid, "name": pid.upper()}
         for pid, feeling in (("aaaaaaaa-love", "love"), ("aaaaaaaa-like", "like"),
                              ("aaaaaaaa-meh", "dislike"), ("aaaaaaaa-no", "hate")):
             app.set_performer_feeling(self.user, pid, feeling)
         perf = app.performer_taste(self.user)
-        self.assertEqual([perf[p] for p in ("fav", "aaaaaaaa-love", "aaaaaaaa-like", "aaaaaaaa-meh", "aaaaaaaa-no")],
-                         [(4, "favourite"), (8, "love"), (4, "like"), (-4, "dislike"), (None, "hate")])
+        self.assertNotIn("fav", perf)
+        self.assertEqual([perf[p] for p in ("aaaaaaaa-love", "aaaaaaaa-like", "aaaaaaaa-meh", "aaaaaaaa-no")],
+                         [(8, "love"), (4, "like"), (-4, "dislike"), (None, "hate")])
         points = lambda *ids, tags=(): d.performer_points(ids, tags, perf)
-        self.assertEqual(points("fav", "aaaaaaaa-meh", "x"), 0)
-        self.assertEqual(points("fav", "aaaaaaaa-love"), 12)                        # together: add up
+        self.assertEqual(points("aaaaaaaa-like", "aaaaaaaa-meh", "x"), 0)
+        self.assertEqual(points("aaaaaaaa-like", "aaaaaaaa-love"), 12)              # together: add up
         several = [next(iter(d.MULTI_SCENE_TAGS))]
-        self.assertEqual(points("fav", "aaaaaaaa-love", "aaaaaaaa-meh", tags=several), 4)  # best, worst
-        self.assertIsNone(points("fav", "aaaaaaaa-no"))                             # hated: never
+        self.assertEqual(points("aaaaaaaa-like", "aaaaaaaa-love", "aaaaaaaa-meh", tags=several), 4)  # best, worst
+        self.assertIsNone(points("aaaaaaaa-like", "aaaaaaaa-no"))                   # hated: never
         self.assertIsNone(d.taste((5, 0, 0, False), points("aaaaaaaa-no")))
         self.assertEqual(app.performer("aaaaaaaa-meh", self.user)["feeling"], "dislike")
-        self.assertEqual(app.favourite_performers(self.user), {"fav", "aaaaaaaa-love", "aaaaaaaa-like"})
-        app.set_performer_feeling(self.user, "fav", "dislike")                     # wins over a favourite
-        self.assertEqual(app.performer_taste(self.user)["fav"], (-4, "dislike"))
-        self.assertNotIn("fav", app.favourite_performers(self.user))
-        app.set_performer_feeling(self.user, "fav", "neutral")
-        self.assertEqual(app.performer_taste(self.user)["fav"], (4, "favourite"))
+        self.assertEqual(app.favourite_performers(self.user), {"aaaaaaaa-love", "aaaaaaaa-like"})
+        app.set_performer_feeling(self.user, "aaaaaaaa-like", "neutral")
+        self.assertNotIn("aaaaaaaa-like", app.performer_taste(self.user))
         self.assertEqual([x["feeling"] for x in app.performer_feelings(self.user, named=True)],
-                         ["like", "love", "dislike", "hate"])                      # by name
+                         ["love", "dislike", "hate"])                               # by name
+
+    def test_admins_feelings_make_stashdb_favourites(self):
+        app, synced = self.app, []
+        app.stash.find_performer = lambda pid: {"id": pid, "name": pid}
+        app.stash.set_favorite = lambda kind, pid, fav: synced.append((kind, pid, fav))
+        app.set_performer_feeling(self.user, "aaaaaaaa-1", "love")
+        self.assertEqual(synced, [])                                    # not an admin: theirs only
+        app.set_performer_feeling(self.admin, "aaaaaaaa-1", "love")
+        app.set_performer_feeling(self.admin, "aaaaaaaa-1", "dislike")
+        self.assertEqual(synced, [("performer", "aaaaaaaa-1", True), ("performer", "aaaaaaaa-1", False)])
+        other = self.user_row(app.create_user("boss2", "password1", is_admin=True))
+        app.set_performer_feeling(other, "aaaaaaaa-1", "like")
+        app.set_performer_feeling(self.admin, "aaaaaaaa-1", "hate")
+        self.assertEqual(synced[-1], ("performer", "aaaaaaaa-1", True))  # the other admin likes them
+
+        def down(*a):
+            raise d.ApiError(502, "StashDB is down")
+        app.stash.set_favorite = down
+        self.assertEqual(app.set_performer_feeling(self.admin, "aaaaaaaa-2", "like"),
+                         {"feeling": "like", "stashdb": "StashDB is down"})
+        self.assertEqual(app.performer_feelings(self.admin)["aaaaaaaa-2"], 1)  # kept all the same
+
+    def test_stashdb_favourites_imported_once(self):
+        app = self.app
+        app.stash.query_performers = lambda inp: {"count": 2, "performers": [
+            {"id": "aaaaaaaa-1", "name": "Ann"}, {"id": "aaaaaaaa-2", "name": "Bea"}]}
+        app.stash.find_performer = lambda pid: {"id": pid, "name": pid}
+        app.stash.set_favorite = lambda *a: None
+        app.set_performer_feeling(self.admin, "aaaaaaaa-2", "love")
+        self.assertEqual(app.import_stash_favourites(), 2)
+        self.assertEqual(app.performer_feelings(self.admin), {"aaaaaaaa-1": 1, "aaaaaaaa-2": 2})  # kept
+        self.assertEqual(app.performer_feelings(self.user), {})
+        self.assertEqual(app.import_stash_favourites(), 0)                # once
+        favs, synced = {"aaaaaaaa-1", "aaaaaaaa-3"}, []
+        app.stash.query_performers = lambda inp: {"count": len(favs), "performers": [{"id": i} for i in sorted(favs)]}
+        app.stash.set_favorite = lambda kind, pid, fav: synced.append((pid, fav))
+        app.set_performer_feeling(self.user, "aaaaaaaa-4", "love")       # not an admin's: not theirs
+        self.assertEqual(app.sync_stash_favourites(), 2)
+        self.assertEqual(synced, [("aaaaaaaa-2", True), ("aaaaaaaa-3", False)])
+        self.assertEqual(app.sync_stash_favourites(), 0)                  # once
 
     def test_hated_performer_never_recommended(self):
         app = self.app
