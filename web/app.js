@@ -248,6 +248,7 @@ const ICONS = {
   alert: '<path d="M12 3 2 20h20zM12 9v5M12 17h.01"/>',
   play: '<path d="M7 4.5v15l12.5-7.5z"/>',
   bookmark: '<path d="M6 3.5h12v17l-6-4.2-6 4.2z"/>',
+  similar: '<circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>',
   sparkle: '<path fill="currentColor" stroke="none" d="M12 2c.8 5.6 4.4 9.2 10 10-5.6.8-9.2 4.4-10 10-.8-5.6-4.4-9.2-10-10 5.6-.8 9.2-4.4 10-10z"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/>',
 };
@@ -521,18 +522,21 @@ function sceneCard(s) {
   const meta = [s.studio?.name, fmtDate(s.release_date)].filter(Boolean).join(" · ");
   // The picture opens the photo viewer (at the card's picture), the text the scene.
   const photos = (s.images || []).map((i) => i.url);
-  // Its points in the corner, where Request shows on hover (or beside the state, when there's
-  // nothing to request): a ranked row's, else what its tags add by how you feel about them.
-  const points = s.points != null ? html`<span class="points" title="Rank points: how well it matches this scene and your taste">${icon("sparkle")}${s.points}</span>`
-    : s.hated ? html`<span class="points hated" title="It has a tag you hate">${icon("ban")}</span>`
-    : s.taste != null ? html`<span class="points" title="Your taste: what its tags add by how you feel about them">${icon("sparkle")}${s.taste}</span>` : "";
+  // Its scores in the corner, where Request shows on hover (or beside the state, when there's
+  // nothing to request): under a scene, how similar it is to that one; then your taste for it.
+  const chips = [
+    s.points != null ? html`<span class="points similar" title="Similarity to this scene: the performers and tags they share, and the tags you love or like">${icon("similar")}${s.points}</span>` : "",
+    s.hated ? html`<span class="points hated" title="It has a tag you hate">${icon("ban")}</span>`
+      : s.taste != null ? html`<span class="points" title="Your taste: what its tags add by how you feel about them">${icon("sparkle")}${s.taste}</span>` : "",
+  ].filter(Boolean);
+  const points = chips.length ? html`<div class="scores ${canRequest(s.state) ? "" : "beside"}">${chips}</div>` : "";
   return html`<div class="card scene-card" data-scene="${s.id}">
     <div class="thumb">
       ${im ? html`<button type="button" class="zoom-card" data-photos="${JSON.stringify(photos)}" data-start="${photos.indexOf(im)}" data-title="${s.title || ""}" aria-label="Show the picture larger">
         <img src="${imgUrl(im, 600)}" alt="" loading="lazy" decoding="async"><span class="magnifier">${icon("zoomIn")}</span></button>` : noImg()}
       ${s.duration ? html`<span class="dur">${fmtDur(s.duration)}</span>` : ""}
-      ${points && canRequest(s.state) ? points : ""}
-      <div class="quick">${points && !canRequest(s.state) ? points : ""}${sceneQuick(s)}</div>
+      ${points}
+      <div class="quick">${sceneQuick(s)}</div>
       ${progressBar(s.state)}
     </div>
     <a class="body" href="/scene/${s.id}">

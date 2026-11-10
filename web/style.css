@@ -161,11 +161,13 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .scene-card .req-btn { opacity: 0; transition: opacity .15s; }
 .points { display: inline-flex; align-items: center; gap: 3px; background: rgba(0,0,0,.65); font-size: 11px; font-weight: 600; padding: 1px 7px 1px 5px; border-radius: 6px; font-variant-numeric: tabular-nums; transition: opacity .15s; }
 .points svg { width: 11px; height: 11px; color: var(--accent-hi); }
+.points.similar svg { color: #93c5fd; stroke-width: 2.4; }
 .points.hated { padding: 2px 5px; }
 .points.hated svg { color: #fca5a5; }
-.scene-card .thumb > .points { position: absolute; top: 8px; right: 8px; pointer-events: none; }
+.scene-card .scores { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; pointer-events: none; }
+.scene-card .scores.beside { right: 40px; }
 .scene-card:hover .points, .scene-card:focus-within .points { opacity: 0; }
-@media (hover: none) { .scene-card .thumb > .points { top: 40px; } }
+@media (hover: none) { .scene-card .scores:not(.beside) { top: 40px; } }
 .scene-card:hover .req-btn, .scene-card:focus-within .req-btn { opacity: 1; }
 @media (hover: none) { .scene-card .req-btn { opacity: 1; } }
 

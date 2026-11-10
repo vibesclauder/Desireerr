@@ -121,7 +121,8 @@ On a phone, open it and "Add to home screen" for an app icon.
   one 2 (times its rarity, see Scene pages), a disliked one -5, and a ban sign for a hated one; a
   scene's page lists the tags that make it. Sort by *Your taste* to see the newest 500 scenes
   that match the filters, best first; a performer's page does that to start with (Settings,
-  Your taste: or newest first). The reels under a scene show their own rank points instead.
+  Your taste: or newest first). In the reels under a scene, a similarity score (two
+  circles) sits above it: what they're ranked by.
   The tags you love or like are your favourite tags: a filter, "With any of the tags I love
   or like" on Scenes (and saved searches, which use them as they are at each check), and the
   top of the Tags page. Wherever tags are listed, they show how you feel about them.
