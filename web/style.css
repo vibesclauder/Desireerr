@@ -315,6 +315,9 @@ textarea.input { height: auto; padding: 10px 12px; }
 .hero-photos { display: grid; grid-auto-flow: column; grid-auto-columns: 48px; gap: 6px; justify-content: start; overflow-x: auto; overflow-y: hidden; padding: 2px 2px 4px; scrollbar-width: thin; }
 .hero-photos .thumb-btn { border-radius: 7px; }
 .hero-photos .card:hover { transform: none; }
+/* The reel level with the top of the profile photo, the rest at the bottom as ever. */
+.hero.person .hero-info:has(> .hero-photos) { align-self: stretch; display: flex; flex-direction: column; justify-content: flex-end; }
+.hero.person .hero-photos { margin-bottom: auto; max-width: 100%; }
 .hero.compact { min-height: 0; padding-top: 28px; }
 @media (max-width: 760px) {
   .hero { margin: 0 calc(-1 * max(16px, env(safe-area-inset-left))); padding: 24px max(16px, env(safe-area-inset-left)) 4px; min-height: 0; }
