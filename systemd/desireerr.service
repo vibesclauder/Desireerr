@@ -1,6 +1,6 @@
 # Desireerr: Seerr-style requests for StashDB scenes, through Whisparr. Port 5056.
 # User unit: install to ~/.config/systemd/user/ (see README). Runs as you, so it can read
-# torrent-box's Whisparr API key; no root needed for a port above 1024.
+# Whisparr's API key from its config.xml; no root needed for a port above 1024.
 [Unit]
 Description=Desireerr request app (StashDB + Whisparr)
 Documentation=https://github.com/vibesclauder/desireerr
@@ -9,6 +9,8 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/bin/python3 %h/desireerr/desireerr.py --port 5056 --data %S/desireerr --cache %C/desireerr/images
+# Whisparr's config.xml somewhere else (in a container's folder, say)? A drop-in can say where:
+# Environment=DESIREERR_WHISPARR_CONFIG=/path/to/whisparr/config.xml
 Restart=on-failure
 RestartSec=5
 

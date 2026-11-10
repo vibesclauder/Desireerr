@@ -14,7 +14,6 @@ browser only talks to Desireerr and nothing loads before you sign in.
 
 import argparse
 import base64
-import configparser
 import contextlib
 import errno
 import hashlib
@@ -45,11 +44,10 @@ USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
 DEFAULT_WHISPARR = "http://localhost:6969"
-# torrent-box keeps Whisparr's config here; its API key is read from it when none is set.
-WHISPARR_CONFIG = Path.home() / ".local/share/torrent-box/arr/whisparr/config.xml"
-# torrent-box's settings: its ntfy server (config.ini) and topic (secrets.ini) are used when
-# none are set, so the phone that gets torrent-box's pushes gets Desireerr's too.
-TORRENT_BOX_CONF = Path.home() / ".config/rss2transmission"
+# Whisparr's own config.xml, whose API key is used when none is set in Settings: the one
+# DESIREERR_WHISPARR_CONFIG names (Whisparr in a container, say), else where Whisparr keeps it
+# installed for a user or as a system service.
+WHISPARR_CONFIGS = [Path.home() / ".config/Whisparr/config.xml", Path("/var/lib/whisparr/config.xml")]
 DEFAULT_JELLYFIN = "http://localhost:8096"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -126,14 +124,14 @@ TASTE_TTL = 600
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
     "whisparr_url": DEFAULT_WHISPARR,
-    "whisparr_key": "",          # empty: read from torrent-box's Whisparr config.xml
+    "whisparr_key": "",          # empty: read from Whisparr's config.xml (WHISPARR_CONFIGS)
     "quality_profile_id": "",    # empty: the one most studios use
     "root_folder": "",           # empty: Whisparr's first root folder
     "search_on_request": "1",
     "stall_days": "7",           # approved, no release this many days: stalled
     "tab_title": "Desireerr",
-    "notify_server": "",         # empty: torrent-box's ntfy server
-    "notify_topic": "",          # empty: torrent-box's ntfy topic
+    "notify_server": "",         # empty: https://ntfy.sh
+    "notify_topic": "",          # empty: no pushes
     "notify_events": "pending,watch,available,failed,stalled",
     "notify_discreet": "1",      # no titles, names or pictures in pushes
     "app_url": "",               # for links in pushes; empty: where the app was last opened
@@ -656,11 +654,17 @@ query ($input: TagQueryInput!) {
 # Whisparr v3
 # ---------------------------------------------------------------------------------------
 
-def whisparr_config_key(path=WHISPARR_CONFIG):
-    try:
-        return ET.parse(path).getroot().findtext("ApiKey") or ""
-    except (OSError, ET.ParseError):
-        return ""
+def whisparr_config_key():
+    """The API key in Whisparr's config.xml (see WHISPARR_CONFIGS), or ""."""
+    named = os.environ.get("DESIREERR_WHISPARR_CONFIG", "").strip()
+    for path in ([Path(named)] if named else []) + WHISPARR_CONFIGS:
+        try:
+            key = ET.parse(path).getroot().findtext("ApiKey")
+        except (OSError, ET.ParseError):
+            continue
+        if key:
+            return key.strip()
+    return ""
 
 
 class Whisparr:
@@ -887,35 +891,18 @@ NOTIFY_EVENTS = {
 }
 
 
-def torrent_box_ntfy(conf_dir=None):
-    """torrent-box's ntfy server and topic, or empty strings."""
-    conf_dir = Path(conf_dir or TORRENT_BOX_CONF)
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        parser.read([conf_dir / "config.ini", conf_dir / "secrets.ini"], encoding="utf-8")
-    except configparser.Error:
-        return "", ""
-    topic = parser.get("secrets", "ntfy_topic", fallback="").strip()
-    server = parser.get("ntfy", "server", fallback="").strip() or "https://ntfy.sh"
-    return (server, topic) if topic else ("", "")
-
-
 class Notifier:
     """Pushes about requests to an ntfy topic, worded like Seerr's (title, scene, who asked,
     a cover and a link), or discreetly: the tab title and a line that names nothing."""
 
-    def __init__(self, db, conf_dir=None):
+    def __init__(self, db):
         self.db = db
-        self.conf_dir = conf_dir
         self.error = ""          # the last push's trouble, for Settings
         self.background = True   # tests push in the same thread
 
     def target(self, s=None):
         s = s or self.db.settings()
-        if s["notify_server"] or s["notify_topic"]:
-            return (s["notify_server"] or "https://ntfy.sh").rstrip("/"), s["notify_topic"]
-        server, topic = torrent_box_ntfy(self.conf_dir)
-        return server.rstrip("/"), topic
+        return (s["notify_server"] or "https://ntfy.sh").rstrip("/"), s["notify_topic"]
 
     @staticmethod
     def app_url(s):
@@ -2760,8 +2747,6 @@ class App:
             "write_nfo": s["write_nfo"] == "1",
             "nfo_error": self.nfo_error,
         }
-        tb_server, tb_topic = torrent_box_ntfy(self.notify.conf_dir)
-        out["torrent_box_ntfy"] = tb_server if tb_topic else ""
         try:
             profiles, roots = self.whisparr.options()
             out["profiles"], out["roots"] = profiles, roots
@@ -3387,14 +3372,14 @@ def tag_counter(app):
         time.sleep(3600)
 
 
-def init(app, user="", password="", stashdb_key="", jellyfin_key=""):
-    """Set up the admin, the StashDB key and a Jellyfin API key from outside, e.g. from
-    torrent-box's setup.
+def init(app, user="", password="", stashdb_key="", jellyfin_key="", ntfy_server="", ntfy_topic=""):
+    """Set up the admin, the StashDB key, a Jellyfin API key and an ntfy topic from outside,
+    e.g. from the setup script of the server it runs on.
 
     The admin gets a login shared with other apps; a salted hash of it is kept, so a later
     run can tell whether that login changed (then the admin follows it) without storing it.
     An admin made on the first visit and a key set in Settings are never overwritten; a
-    Jellyfin key given here before is replaced by a new one.
+    Jellyfin key or ntfy topic given here before is replaced by a new one.
     Returns what was done, one line each.
     """
     db, done = app.db, []
@@ -3450,6 +3435,18 @@ def init(app, user="", password="", stashdb_key="", jellyfin_key=""):
             done.append("Jellyfin key: set (available scenes get a Watch button)")
         else:
             done.append("Jellyfin key: keeps the one set in Desireerr")
+    if ntfy_topic:
+        given = {"server": (ntfy_server or "https://ntfy.sh").rstrip("/"), "topic": ntfy_topic}
+        saved = {"server": db.setting("notify_server"), "topic": db.setting("notify_topic")}
+        managed = json.loads(db.setting("notify_managed") or "null")
+        if saved == given:
+            done.append("ntfy: up to date")
+        elif not saved["topic"] or saved == managed:
+            db.set_settings({"notify_server": given["server"], "notify_topic": ntfy_topic,
+                             "notify_managed": json.dumps(given)})
+            done.append(f"ntfy: pushes go to {given['server']}")
+        else:
+            done.append("ntfy: keeps the topic set in Desireerr")
     if not app.setup_needed():
         (app.data_dir / "setup-code").unlink(missing_ok=True)
     return done
@@ -3459,7 +3456,8 @@ def cmd_init(argv):
     p = argparse.ArgumentParser(prog="desireerr.py init", description=(
         "Set up the admin and the StashDB key without the first-visit page. The secrets come "
         "from the environment: DESIREERR_ADMIN_USER, DESIREERR_ADMIN_PASSWORD, "
-        "DESIREERR_STASHDB_KEY, DESIREERR_JELLYFIN_KEY (each optional)."))
+        "DESIREERR_STASHDB_KEY, DESIREERR_JELLYFIN_KEY, DESIREERR_NTFY_SERVER and "
+        "DESIREERR_NTFY_TOPIC (each optional)."))
     p.add_argument("--data", default=os.environ.get(
         "DESIREERR_DATA", Path.home() / ".local/state/desireerr"))
     args = p.parse_args(argv)
@@ -3468,7 +3466,9 @@ def cmd_init(argv):
         done = init(app, os.environ.get("DESIREERR_ADMIN_USER", "").strip(),
                     os.environ.get("DESIREERR_ADMIN_PASSWORD", ""),
                     os.environ.get("DESIREERR_STASHDB_KEY", "").strip(),
-                    os.environ.get("DESIREERR_JELLYFIN_KEY", "").strip())
+                    os.environ.get("DESIREERR_JELLYFIN_KEY", "").strip(),
+                    os.environ.get("DESIREERR_NTFY_SERVER", "").strip(),
+                    os.environ.get("DESIREERR_NTFY_TOPIC", "").strip())
     except ApiError as e:
         print(f"desireerr init: {e.message}", file=sys.stderr)
         return 1

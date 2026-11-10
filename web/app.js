@@ -506,7 +506,7 @@ function progressBar(st) {
 const noImg = (ic = "film") => html`<div class="noimg">${icon(ic)}</div>`;
 
 // Under a scene's title: its taste points and the tags and performers that make them, most first.
-const WHY = { favourite: "favourite", followed: "followed", requested: "from your requests", love: "loved", like: "liked", dislike: "disliked", hate: "hated" };
+const WHY = { followed: "followed", requested: "from your requests", love: "loved", like: "liked", dislike: "disliked", hate: "hated" };
 function tasteLine(s) {
   if (s.taste === undefined) return "";
   const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
@@ -1733,7 +1733,7 @@ async function viewSettings(view, ctx) {
       ${s.whisparr_error ? html`<div class="error-box">${s.whisparr_error}</div>` : ""}
       <form class="form-grid" id="wh-form">
         <label class="field"><span>Address</span><input class="input" name="whisparr_url" value="${s.whisparr_url}" placeholder="http://localhost:6969"></label>
-        <label class="field"><span>API key</span><input class="input" name="whisparr_key" type="password" autocomplete="off" placeholder="${s.whisparr_key_from_config ? "Read from torrent-box's Whisparr" : s.whisparr_key_set ? "Saved" : "Whisparr → Settings → General"}"></label>
+        <label class="field"><span>API key</span><input class="input" name="whisparr_key" type="password" autocomplete="off" placeholder="${s.whisparr_key_from_config ? "Read from Whisparr's config.xml" : s.whisparr_key_set ? "Saved" : "Whisparr → Settings → General"}"></label>
         <label class="field"><span>Quality profile</span><select class="input" name="quality_profile_id">${option("", "Same as most studios", s.quality_profile_id)}${(s.profiles || []).map((p) => option(String(p.id), p.name, s.quality_profile_id))}</select></label>
         <label class="field"><span>Folder for new scenes</span><select class="input" name="root_folder">${option("", "Whisparr's first folder", s.root_folder)}${(s.roots || []).map((r) => option(r.path, r.path, s.root_folder))}</select></label>
         <label class="field"><span>Stalled after (days without a release)</span><input class="input" type="number" name="stall_days" min="1" max="365" value="${s.stall_days}"></label>
@@ -1741,14 +1741,13 @@ async function viewSettings(view, ctx) {
         <div class="btns"><button class="btn primary">Save</button></div>
       </form>
     </section>`);
-    const tb = s.torrent_box_ntfy;
     parts.push(html`<section class="panel">
       <h2>Notifications</h2>
-      <p class="lede">Pushes through ntfy, like Seerr's.${tb ? " Left empty, they go to torrent-box's ntfy topic, so the phone that gets its pushes gets these too." : " Subscribe to the topic in the ntfy app."}</p>
+      <p class="lede">Pushes through ntfy, like Seerr's. Subscribe to the topic in the ntfy app.</p>
       ${s.notify_error ? html`<div class="error-box">${s.notify_error}</div>` : ""}
       <form class="form-grid" id="nt-form">
-        <label class="field"><span>ntfy server</span><input class="input" name="notify_server" value="${s.notify_server}" placeholder="${tb ? `torrent-box's: ${tb}` : "https://ntfy.sh"}"></label>
-        <label class="field"><span>Topic</span><input class="input" name="notify_topic" value="${s.notify_topic}" autocomplete="off" placeholder="${tb ? "torrent-box's topic" : "A long, random name"}"></label>
+        <label class="field"><span>ntfy server</span><input class="input" name="notify_server" value="${s.notify_server}" placeholder="https://ntfy.sh"></label>
+        <label class="field"><span>Topic</span><input class="input" name="notify_topic" value="${s.notify_topic}" autocomplete="off" placeholder="A long, random name"></label>
         <label class="field" style="grid-column:1/-1"><span>Desireerr's address, for links in pushes</span><input class="input" name="app_url" value="${s.app_url}" placeholder="${s.seen_origin || location.origin}"></label>
         <fieldset class="events"><legend>Push when</legend>${NOTIFY_EVENTS.map(([k, l]) => html`<label class="check"><input type="checkbox" name="ev" value="${k}" ${s.notify_events.includes(k) ? "checked" : ""}> ${l}</label>`)}</fieldset>
         <label class="check" style="grid-column:1/-1"><input type="checkbox" name="notify_discreet" ${s.notify_discreet ? "checked" : ""}> Discreet: no titles, names or covers, only “${s.tab_title || "Desireerr"}: A request is ready.” and the like. Without it, pushes are like Seerr's: what happened, the scene, who asked, its cover and a link to it.</label>
@@ -1757,7 +1756,7 @@ async function viewSettings(view, ctx) {
     </section>`);
     parts.push(html`<section class="panel">
       <h2>Jellyfin</h2>
-      <p class="lede">With an API key, downloaded scenes get a Watch button that opens them in Jellyfin. On a torrent-box server, its setup makes the key.</p>
+      <p class="lede">With an API key, downloaded scenes get a Watch button that opens them in Jellyfin.</p>
       ${s.jellyfin_error ? html`<div class="error-box">${s.jellyfin_error}</div>` : ""}
       ${s.nfo_error ? html`<div class="error-box">Writing .nfo files: ${s.nfo_error}</div>` : ""}
       <form class="form-grid" id="jf-form">
@@ -1945,7 +1944,7 @@ function viewSetup() {
     <label class="field"><span>Password (at least 8 characters)</span><input class="input" name="password" type="password" autocomplete="new-password" minlength="8" required></label>
     <label class="field"><span>Password again</span><input class="input" name="password2" type="password" autocomplete="new-password" minlength="8" required></label>
     <label class="field"><span>StashDB API key</span><input class="input" name="stashdb_key" type="password" autocomplete="off" placeholder="From your stashdb.org profile page"></label>
-    <p class="note" style="margin:-6px 0 0">You can add the key later in Settings. Whisparr is found on its own on a torrent-box server.</p>
+    <p class="note" style="margin:-6px 0 0">You can add the key later in Settings. Whisparr's API key is read from its config.xml when Desireerr can see it, else add it in Settings too.</p>
     <div class="error-box" id="err" hidden></div>
     <button class="btn primary">Create admin and sign in</button>
   </form></div>`.s;

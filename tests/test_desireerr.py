@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -10,9 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import desireerr as d  # noqa: E402
 
-# Never read the real torrent-box's ntfy topic (or push to it) from a test.
-d.TORRENT_BOX_CONF = Path(tempfile.gettempdir()) / "desireerr-tests-no-torrent-box"
-d.WHISPARR_CONFIG = d.TORRENT_BOX_CONF / "config.xml"
+# Never read a real Whisparr's API key from a test.
+d.WHISPARR_CONFIGS = [Path(tempfile.gettempdir()) / "desireerr-tests-no-whisparr" / "config.xml"]
+os.environ.pop("DESIREERR_WHISPARR_CONFIG", None)
 
 
 class FakeWhisparr(d.Whisparr):
@@ -979,19 +980,34 @@ class Notifications(Base):
         self.app.request_scene(self.user, SCENE)
         self.assertEqual(self.app.pushes, [])
 
-    def test_torrent_box_topic_is_used(self):
-        conf = Path(self.tmp.name) / "tb"
-        conf.mkdir()
-        (conf / "config.ini").write_text("[ntfy]\nserver = http://localhost:2586\n")
-        (conf / "secrets.ini").write_text("[secrets]\nntfy_topic = torrent-box-abc\n")
-        self.assertEqual(d.torrent_box_ntfy(conf), ("http://localhost:2586", "torrent-box-abc"))
+    def test_no_topic_no_pushes(self):
         self.app.db.set_settings({"notify_topic": "", "notify_server": ""})
-        self.app.notify.conf_dir = conf
         self.app.request_scene(self.user, SCENE)
-        self.assertEqual(self.app.pushes[0][0], "http://localhost:2586")
-        self.assertEqual(self.app.pushes[0][1]["topic"], "torrent-box-abc")
-        (conf / "secrets.ini").write_text("[secrets]\n")
-        self.assertEqual(d.torrent_box_ntfy(conf), ("", ""))
+        self.assertEqual(self.app.pushes, [])
+
+    def test_ntfy_from_init(self):
+        app = self.app
+        app.db.set_settings({"notify_topic": "", "notify_server": ""})
+        self.assertIn("ntfy: pushes go to http://localhost:2586",
+                      d.init(app, ntfy_server="http://localhost:2586/", ntfy_topic="abc"))
+        app.request_scene(self.user, SCENE)
+        self.assertEqual((app.pushes[0][0], app.pushes[0][1]["topic"]), ("http://localhost:2586", "abc"))
+        self.assertIn("ntfy: up to date", d.init(app, ntfy_server="http://localhost:2586", ntfy_topic="abc"))
+        d.init(app, ntfy_topic="new")                                   # given before: replaced
+        self.assertEqual((app.db.setting("notify_server"), app.db.setting("notify_topic")), ("https://ntfy.sh", "new"))
+        app.db.set_settings({"notify_topic": "mine"})                    # set in Settings: kept
+        self.assertIn("ntfy: keeps the topic set in Desireerr", d.init(app, ntfy_topic="newer"))
+        self.assertEqual(app.db.setting("notify_topic"), "mine")
+
+    def test_whisparr_key_from_its_config(self):
+        conf = Path(self.tmp.name) / "whisparr" / "config.xml"
+        conf.parent.mkdir()
+        conf.write_text("<Config><ApiKey>abc123</ApiKey></Config>")
+        self.assertEqual(d.whisparr_config_key(), "")
+        with unittest.mock.patch.dict(os.environ, {"DESIREERR_WHISPARR_CONFIG": str(conf)}):
+            self.assertEqual(d.whisparr_config_key(), "abc123")
+        with unittest.mock.patch.object(d, "WHISPARR_CONFIGS", [Path(self.tmp.name) / "none.xml", conf]):
+            self.assertEqual(d.whisparr_config_key(), "abc123")
 
     def test_available_once_and_only_when_new(self):
         self.app.request_scene(self.admin, SCENE)

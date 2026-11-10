@@ -62,14 +62,12 @@ or available.
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.
 
-Built for [torrent-box](https://github.com/vibesclauder/torrent-box): it finds Whisparr's API key in
-torrent-box's config on its own.
+It needs a Whisparr v3 to send requests to (on the same machine or one it can reach), a
+StashDB account for its API key, and, if you like, Jellyfin and an ntfy topic.
 
 ## Install
 
-On a torrent-box server, it comes with Whisparr: answer yes to Whisparr in `./setup.sh` (or
-set `[setup] whisparr = yes`). Setup clones this repo to `~/desireerr`, updates it on each
-run and starts it. By hand:
+On a Linux machine with Python 3.10 or later and systemd, as the user it should run as:
 
 ```sh
 gh repo clone vibesclauder/desireerr ~/desireerr
@@ -79,8 +77,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now desireerr
 ```
 
-The service runs as you (user units need `loginctl enable-linger $USER` to start at boot,
-which torrent-box's setup already did). Open `http://<server>:5056`. The first visit asks
+The service runs as you (user units need `loginctl enable-linger $USER` to start at boot). Open `http://<server>:5056`. The first visit asks
 for a setup code, so nobody else on the network can create the admin account first:
 
 ```sh
@@ -90,8 +87,8 @@ cat ~/.local/state/desireerr/setup-code
 Then create the admin and paste your StashDB API key (stashdb.org → your profile → API
 key). It can also be added later under Settings.
 
-To skip that page (torrent-box's setup does this), give the admin login and the key through
-the environment, never the command line:
+To skip that page (from a setup script of your own, say), give the admin login and the key
+through the environment, never the command line:
 
 ```sh
 DESIREERR_ADMIN_USER=alice DESIREERR_ADMIN_PASSWORD=... DESIREERR_STASHDB_KEY=... \
@@ -100,7 +97,21 @@ DESIREERR_ADMIN_USER=alice DESIREERR_ADMIN_PASSWORD=... DESIREERR_STASHDB_KEY=..
 
 Run again with a new password, it updates that admin. An admin made on the first-visit page
 and a key changed in Settings are left alone. `DESIREERR_JELLYFIN_KEY` sets a Jellyfin API
-key the same way (a new one given later replaces it, unless one was set in Settings).
+key the same way (a new one given later replaces it, unless one was set in Settings), and
+`DESIREERR_NTFY_SERVER` (https://ntfy.sh if not given) with `DESIREERR_NTFY_TOPIC` the ntfy
+topic for its pushes.
+
+**Whisparr.** Its address is `http://localhost:6969` unless set in Settings. Its API key, if
+none is set there, is read from Whisparr's `config.xml`: the one `DESIREERR_WHISPARR_CONFIG`
+names (for a Whisparr in a container, its config folder), else `~/.config/Whisparr/` or
+`/var/lib/whisparr/`. To name it, a drop-in:
+
+```sh
+mkdir -p ~/.config/systemd/user/desireerr.service.d
+printf '[Service]\nEnvironment=DESIREERR_WHISPARR_CONFIG=/path/to/whisparr/config.xml\n' \
+    > ~/.config/systemd/user/desireerr.service.d/whisparr.conf
+systemctl --user daemon-reload && systemctl --user restart desireerr
+```
 
 If ufw is on, open the port to the LAN (and the tailnet, if you use Tailscale):
 
@@ -190,8 +201,8 @@ Settings, Notifications: pushes through [ntfy](https://ntfy.sh), for a request w
 approval, one made by a saved search, a scene downloaded, a request failed or stalled
 (those are on to start with), and an automatic approval, an approval or a decline.
 
-- On a torrent-box server they go to its ntfy server and topic (its config), so the phone
-  that gets torrent-box's pushes gets these too. Set a server and topic to use others.
+- They go to the topic set there (or given to `init`), on ntfy.sh or your own ntfy server.
+  Subscribe to it in the ntfy phone app. Without a topic, nothing is pushed.
 - **Discreet** (on to start with): the browser tab title and one line, "A request is ready.",
   with no title, name or cover. Off, they're like Seerr's: what happened, the scene, its
   studio and date, who asked, its cover, and a tap opens the scene.
@@ -199,7 +210,7 @@ approval, one made by a saved search, a scene downloaded, a request failed or st
 
 ## Watch in Jellyfin
 
-With a Jellyfin API key (Settings, Jellyfin; torrent-box's setup makes one), available
+With a Jellyfin API key (Settings, Jellyfin; or `init`'s `DESIREERR_JELLYFIN_KEY`), available
 scenes get a **Watch** button on their page and in Requests. It finds the scene in Jellyfin
 by its file (Whisparr's path, or the file name if the two see different folders) and opens
 it at Jellyfin's address: the one in Settings, or the host Desireerr is opened at, port 8096.
@@ -224,7 +235,7 @@ away; new downloads are read on Jellyfin's next scan. A `.nfo` with Desireerr's 
 the top is rewritten when needed, so edit the details on StashDB, not in the file.
 
 The service's sandbox is read-only outside its own folders, so it needs Whisparr's root
-folders writable. torrent-box's setup adds that; by hand, a drop-in with your root folders:
+folders writable: a drop-in with your root folders:
 
 ```sh
 mkdir -p ~/.config/systemd/user/desireerr.service.d
