@@ -509,12 +509,16 @@ function sceneCard(s) {
   const meta = [s.studio?.name, fmtDate(s.release_date)].filter(Boolean).join(" · ");
   // The picture opens the photo viewer (at the card's picture), the text the scene.
   const photos = (s.images || []).map((i) => i.url);
+  // Rank points, where a row is ranked: in the corner, where Request shows on hover (or
+  // beside the state, when there's nothing to request).
+  const points = s.points != null ? html`<span class="points" title="Rank points">${s.points}</span>` : "";
   return html`<div class="card scene-card" data-scene="${s.id}">
     <div class="thumb">
       ${im ? html`<button type="button" class="zoom-card" data-photos="${JSON.stringify(photos)}" data-start="${photos.indexOf(im)}" data-title="${s.title || ""}" aria-label="Show the picture larger">
         <img src="${imgUrl(im, 600)}" alt="" loading="lazy" decoding="async"><span class="magnifier">${icon("zoomIn")}</span></button>` : noImg()}
       ${s.duration ? html`<span class="dur">${fmtDur(s.duration)}</span>` : ""}
-      <div class="quick">${sceneQuick(s)}</div>
+      ${points && canRequest(s.state) ? points : ""}
+      <div class="quick">${points && !canRequest(s.state) ? points : ""}${sceneQuick(s)}</div>
       ${progressBar(s.state)}
     </div>
     <a class="body" href="/scene/${s.id}">

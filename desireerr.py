@@ -1831,8 +1831,8 @@ class App:
 
     def by_feelings(self, scenes, user, rank=True):
         """SCENES without those the user's tag feelings rule out (with RANK, a disliked tag can be
-        outweighed), best first if RANK, else in their order. If StashDB can't say their tags,
-        as they are."""
+        outweighed), best first if RANK (copies, with their "points"), else in their order. If
+        StashDB can't say their tags, as they are."""
         feel = self.feelings(user)
         if not feel:
             return scenes
@@ -1844,7 +1844,9 @@ class App:
         weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare) for sc in scenes}
         kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
         if rank:  # sorted is stable: the newest first among equals
-            kept.sort(key=lambda sc: weights[sc["id"]][2] - weights[sc["id"]][0])
+            points = {sid: liked - disliked for sid, (liked, _, disliked, _) in weights.items()}
+            kept = [dict(sc, points=round(points[sc["id"]])) for sc in
+                    sorted(kept, key=lambda sc: -points[sc["id"]])]
         return kept
 
     def recent_library(self):
@@ -1979,8 +1981,10 @@ class App:
         outer = {sid: sc for sid, sc in outer.items() if recommendable(weights[sid])}
 
         def ranked(found, score):
+            """Best first, copies with their "points" (StashDB's cards are cached, shared)."""
             order = {sid: n for n, sid in enumerate(found)}
-            return sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))[:SIMILAR_MAX]
+            best = sorted(found.values(), key=lambda sc: (-score(sc), order[sc["id"]]))[:SIMILAR_MAX]
+            return [dict(sc, points=round(score(sc))) for sc in best]
 
         def inner_score(sc):
             return (SIMILAR_FAV_HERE * len(people(sc) & favs_here)

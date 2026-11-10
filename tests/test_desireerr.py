@@ -527,6 +527,15 @@ class Similar(unittest.TestCase):
         self.assertEqual(self.rows()["discover"], ["y3", "y1"])
         self.assertTrue(self.asked(None, ["B", "A"]))  # among the neutral ones, the rarest first
 
+    def test_rank_points(self):
+        self.listed = [self.card("x1", "w1"), self.card("y1", "w2"), self.card("y2")]
+        self.app.stash.tags = {"x1": ["A"], "y1": ["D"]}
+        self.app.rare = {"D": 1.6}
+        rows = {r["key"]: r["scenes"] for r in self.app.similar(SCENE, {"id": 1})["rows"]}
+        self.assertEqual([sc["points"] for sc in rows["inner"]], [30])         # 25 + 5
+        self.assertEqual([sc["points"] for sc in rows["discover"]], [8, 0])    # 5 + 3.2: rounded
+        self.assertNotIn("points", self.listed[0])  # StashDB's cached card stays as it was
+
     def test_disliked_tags(self):
         self.listed = [self.card("x1", "w1"), self.card("x2", "w1"),
                        self.card("y1"), self.card("y2"), self.card("y3"), self.card("y4")]
@@ -559,8 +568,8 @@ class Similar(unittest.TestCase):
         self.listed = [self.card(n) for n in ("n1", "n2", "n3", "n4", "n5", "n6", "n7")]  # newest first
         self.app.stash.tags = {"n1": ["D"], "n2": ["A"], "n3": ["A", "E"], "n4": ["A", "D"],
                                "n5": ["H", "A"], "n6": ["D"], "n7": ["A", "D", "E"]}
-        got = [sc["id"] for sc in self.app.new_with_loved_tags({"id": 1})]
-        self.assertEqual(got, ["n4", "n2", "n1", "n6", "n7"])  # 6, 4, 2, 2, 1; n3 4 < 5; n5 hated
+        got = [(sc["id"], sc["points"]) for sc in self.app.new_with_loved_tags({"id": 1})]
+        self.assertEqual(got, [("n4", 6), ("n2", 4), ("n1", 2), ("n6", 2), ("n7", 1)])  # n3 4 < 5; n5 hated
         self.assertEqual((self.queries[-1]["tags"], self.queries[-1]["sort"], self.queries[-1]["per_page"]),
                          ({"value": ["A", "D"], "modifier": "INCLUDES"}, "DATE", d.DISCOVER_POOL))
         self.app.fav_tag_ids = lambda user: []
