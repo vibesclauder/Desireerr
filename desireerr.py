@@ -647,8 +647,9 @@ query ($input: TagQueryInput!) {
         field = {"performer": "favoritePerformer", "studio": "favoriteStudio"}[kind]
         q = f"mutation ($id: ID!, $fav: Boolean!) {{ {field}(id: $id, favorite: $fav) }}"
         self.query(q, {"id": sid, "fav": bool(favorite)}, ttl=0)
-        with self.lock:
-            self.cache.clear()   # pages and lists show is_favorite
+        if kind == "studio":     # its page and the lists show is_favorite; a performer's, nowhere
+            with self.lock:
+                self.cache.clear()
 
 
 # ---------------------------------------------------------------------------------------
