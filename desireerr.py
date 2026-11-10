@@ -90,6 +90,8 @@ DISCOVER_POOL = 100          # "New with tags you love or like" picks from this 
 RARITY_TYPICAL = 30000
 RARITY_MIN, RARITY_MAX = 0.25, 3.0
 TAG_COUNT_TTL = 7 * 86400
+TASTE_POOL = 500             # sorted by taste: this many of the newest matching scenes
+TASTE_TTL = 600
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -284,6 +286,7 @@ COLUMNS = [
     ("requests", "notified", "TEXT NOT NULL DEFAULT ''"),   # pushes sent once: available, stalled
     ("requests", "searched_at", "INTEGER"),                 # last "search again"
     ("watches", "follow", "TEXT NOT NULL DEFAULT ''"),      # "performer:<id>": a follow
+    ("users", "performer_sort", "TEXT NOT NULL DEFAULT 'TASTE'"),  # a performer's scenes: TASTE, DATE
 ]
 
 
@@ -351,6 +354,7 @@ fragment SceneCard on Scene {
   studio { id name }
   images { url width height }
   performers { as performer { id name gender } }
+  tags { id }
 }"""
 
 SCENE_FULL = SCENE_CARD + """
@@ -1258,6 +1262,13 @@ def recommendable(weights, outweigh=True):
     return not hated and (not disliked or outweigh and liked > disliked)
 
 
+def taste(weights):
+    """A scene's taste points, from weigh_tags: what its loved and liked tags add less what its
+    disliked ones take off; None with a hated tag."""
+    liked, _, disliked, hated = weights
+    return None if hated else round(liked - disliked)
+
+
 def id_list(value):
     return [v for v in (value or "").split(",") if re.fullmatch(r"[0-9a-fA-F-]{8,40}", v)]
 
@@ -1319,7 +1330,7 @@ class App:
         if not token:
             return None
         return self.db.one(
-            "SELECT u.id, u.username, u.is_admin, u.auto_approve FROM sessions s "
+            "SELECT u.id, u.username, u.is_admin, u.auto_approve, u.performer_sort FROM sessions s "
             "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires > ?",
             (hashlib.sha256(token.encode()).hexdigest(), now()))
 
@@ -1375,11 +1386,21 @@ class App:
             "FROM users u ORDER BY u.username")
 
     # -- status -------------------------------------------------------------------------
-    def annotate(self, scenes):
-        """Add each scene's request state, from Whisparr and our own requests."""
-        scenes = [s for s in scenes if s]
+    def annotate(self, scenes, user=None):
+        """Copies of SCENES with their request state, from Whisparr and our own requests, and
+        with a USER who has tag feelings, their "taste" (see taste; "hated" if None). Without
+        their tags: the page doesn't need them."""
+        scenes = [dict(s) for s in scenes if s]
         if not scenes:
             return scenes
+        feel = self.feelings(user)
+        if feel:
+            rare, tags = self.rarities(), self.card_tags(scenes)
+            for s in scenes:
+                s["taste"] = taste(weigh_tags(tags.get(s["id"], ()), feel, rare=rare))
+                s["hated"] = s["taste"] is None
+        for s in scenes:
+            s.pop("tags", None)
         self.whisparr.ensure_fresh()
         ids = [s["id"] for s in scenes]
         marks = ",".join("?" * len(ids))
@@ -1639,19 +1660,42 @@ class App:
         inp = self.scene_input(q, favs)
         if q.get("fav_tags") == "1" and not favs:
             return {"count": 0, "scenes": [], "page": inp["page"], "per_page": inp["per_page"]}
+        if q.get("sort") == "TASTE":
+            return self.by_taste(q, inp, favs, user)
         result, scenes = self.filtered_scenes(q, inp, favs)
-        return {"count": result["count"], "scenes": self.annotate(scenes), "page": inp["page"],
+        return {"count": result["count"], "scenes": self.annotate(scenes, user), "page": inp["page"],
                 "per_page": inp["per_page"]}
+
+    def by_taste(self, q, inp, favs, user):
+        """A page of the newest TASTE_POOL scenes that match, by the user's taste for them (see
+        taste), the newest first among equals, those with a hated tag last."""
+        pool, page, count = [], 1, 0
+        while len(pool) < TASTE_POOL:
+            got = self.stash.query_scenes(dict(inp, page=page, per_page=PER_PAGE_MAX, sort="DATE",
+                                               direction="DESC"), TASTE_TTL)
+            pool += got["scenes"]
+            count = got["count"]
+            if len(got["scenes"]) < PER_PAGE_MAX:
+                break
+            page += 1
+        scenes = self.annotate(self.check_tags(q, pool[:TASTE_POOL], favs), user)
+        scenes.sort(key=lambda sc: (sc.get("hated", False), -(sc.get("taste") or 0)))
+        start = (inp["page"] - 1) * inp["per_page"]
+        return {"count": len(scenes), "scenes": scenes[start:start + inp["per_page"]],
+                "page": inp["page"], "per_page": inp["per_page"], "newest": count > TASTE_POOL and TASTE_POOL}
 
     def filtered_scenes(self, q, inp, favs=(), ttl=300):
         """StashDB's answer to a scene query, and its scenes that pass the tag checks StashDB
         couldn't take (see tag_plan)."""
         result = self.stash.query_scenes(inp, ttl)
-        scenes = result["scenes"]
+        return result, self.check_tags(q, result["scenes"], favs)
+
+    def check_tags(self, q, scenes, favs=()):
+        """SCENES that pass the tag checks StashDB couldn't take (see tag_plan)."""
         _, need_one, need_all, not_tags = self.tag_plan(q, favs)
         if need_one or need_all or not_tags:
-            # So a page can come back short. The scene cards carry no tags: fetch them.
-            full = {sid: set(t) for sid, t in self.scene_tags([s["id"] for s in scenes]).items()}
+            # So a page can come back short.
+            full = {sid: set(t) for sid, t in self.card_tags(scenes).items()}
             need_one, need_all, not_tags = set(need_one), set(need_all), set(not_tags)
 
             def ok(sc):
@@ -1659,7 +1703,7 @@ class App:
                 return ((not need_one or have & need_one) and need_all <= have
                         and not have & not_tags)
             scenes = [sc for sc in scenes if ok(sc)]
-        return result, scenes
+        return scenes
 
     # -- tag feelings (Desireerr's own, per user): love, like, dislike, hate ----------------
     def tag_feelings(self, user):
@@ -1728,6 +1772,18 @@ class App:
         self.rare = None
         return len(ids)
 
+    def card_tags(self, scenes):
+        """Scene ID -> its tag IDs: from the cards (SceneCard has them), else asked for. If
+        StashDB can't say, none."""
+        found = {sc["id"]: [t["id"] for t in sc["tags"]] for sc in scenes if "tags" in sc}
+        rest = [sc["id"] for sc in scenes if sc["id"] not in found]
+        if rest:
+            try:
+                found.update(self.scene_tags(rest))
+            except ApiError:
+                pass
+        return found
+
     def scene_tags(self, ids):
         found = self.stash.find_many("findScene", ids, "{ id tags { id } }")
         return {s["id"]: [t["id"] for t in s["tags"]] for s in found}
@@ -1785,7 +1841,7 @@ class App:
         with self.discover_lock:
             self.discover_cache[user["id"]] = (made, {**kept, **keep})
         rows.update(kept)
-        out = [dict(rows[key], scenes=self.annotate([dict(sc) for sc in rows[key]["scenes"]]))
+        out = [dict(rows[key], scenes=self.annotate(rows[key]["scenes"], user))
                for key, *_ in specs]
         mine = self.db.all("SELECT * FROM requests WHERE user_id = ? ORDER BY id DESC LIMIT 12",
                            (user["id"],))
@@ -1836,10 +1892,7 @@ class App:
         feel = self.feelings(user)
         if not feel:
             return scenes
-        try:
-            tags = self.scene_tags([sc["id"] for sc in scenes])
-        except ApiError:
-            return scenes
+        tags = self.card_tags(scenes)
         rare = self.rarities()
         weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare) for sc in scenes}
         kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
@@ -1855,7 +1908,7 @@ class App:
         order = {sid: i for i, sid in enumerate(ids)}
         return sorted(self.stash.find_scenes(ids), key=lambda s: order.get(s["id"], 99))
 
-    def scene(self, scene_id):
+    def scene(self, scene_id, user=None):
         scene = self.stash.find_scene(scene_id)
         if not scene:
             raise ApiError(404, "StashDB has no scene with that ID.")
@@ -1866,6 +1919,18 @@ class App:
         if scene["request"]:
             scene["state"] = scene["request"]["state"]
         scene["stashdb_url"] = f"{STASHDB_WEB}/scenes/{scene_id}"
+        feel = self.feelings(user)
+        if feel:
+            scene = dict(scene)  # StashDB's answer is cached
+            rare = self.rarities()
+            weighed, names = [], {v: k for k, v in FEELINGS.items()}
+            for t in scene.get("tags") or []:
+                points = weigh_tags([t["id"]], feel, rare=rare)
+                if feel.get(t["id"], 0):
+                    weighed.append({"id": t["id"], "name": t["name"], "feeling": names[feel[t["id"]]],
+                                    "points": None if points[3] else round(points[0] - points[2], 1)})
+            scene["taste"] = taste(weigh_tags([t["id"] for t in scene.get("tags") or []], feel, rare=rare))
+            scene["taste_tags"] = sorted(weighed, key=lambda t: -abs(t["points"] if t["points"] is not None else 99))
         return scene
 
     def similar(self, scene_id, user=None):
@@ -1967,10 +2032,7 @@ class App:
         for sid in {sc["id"] for sc in again}:
             inner.pop(sid, None)
             outer.pop(sid, None)
-        try:
-            their_tags = self.scene_tags(list(inner) + list(outer))
-        except ApiError:
-            their_tags = {}
+        their_tags = self.card_tags(list({**inner, **outer}.values()))
 
         weights = {sid: weigh_tags(their_tags.get(sid, ()), feel, mine, rare) for sid in {**inner, **outer}}
 
@@ -1995,7 +2057,7 @@ class App:
         rows = [("inner", "Similar scenes with favourite performers", "", ranked(inner, inner_score)),
                 ("discover", "Discover similar scenes", "", ranked(outer, outer_score)),
                 ("together", "Together again", "Two or more of this cast in another scene", again)]
-        return {"rows": [{"key": key, "title": title, "sub": sub, "scenes": self.annotate(scenes)}
+        return {"rows": [{"key": key, "title": title, "sub": sub, "scenes": self.annotate(scenes, user)}
                          for key, title, sub, scenes in rows if scenes]}
 
     def favourite_performers(self, user=None):
@@ -2136,13 +2198,12 @@ class App:
             return self.stash.query_tags(inp)
         return {"categories": self.stash.tag_categories()}
 
-    def search(self, term):
+    def search(self, term, user=None):
         term = (term or "").strip()[:200]
         if not term:
             return {"scenes": [], "performers": [], "studios": [], "tags": []}
         found = self.stash.search(term)
-        self.annotate(found["scenes"])
-        return found
+        return dict(found, scenes=self.annotate(found["scenes"], user))
 
     def set_favorite(self, kind, sid, favorite):
         """Favourite (or not) on StashDB only: a filter for Discover, Scenes and the lists.
@@ -2700,11 +2761,11 @@ class Handler(BaseHTTPRequestHandler):
         if key == ("GET", "scenes"):
             return 200, app.browse_scenes(q, user), None
         if key == ("GET", "scene") and len(parts) == 2:
-            return 200, app.scene(parts[1]), None
+            return 200, app.scene(parts[1], user), None
         if key == ("GET", "scene") and len(parts) == 3 and parts[2] == "similar":
             return 200, app.similar(parts[1], user), None
         if key == ("GET", "search"):
-            return 200, app.search(q.get("q")), None
+            return 200, app.search(q.get("q"), user), None
         if key == ("GET", "performers"):
             return 200, app.browse_performers(q), None
         if key == ("GET", "performer") and len(parts) == 2:
@@ -2802,6 +2863,12 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, app.check_watch(wid), None
 
         # -- account --
+        if key == ("POST", "prefs"):
+            body = self.body_json()
+            if body.get("performer_sort") not in ("TASTE", "DATE"):
+                raise ApiError(400, "Sort a performer's scenes by TASTE or DATE.")
+            app.db.run("UPDATE users SET performer_sort = ? WHERE id = ?", (body["performer_sort"], user["id"]))
+            return 200, {"ok": True}, None
         if key == ("POST", "password"):
             body = self.body_json()
             full = app.db.one("SELECT * FROM users WHERE id = ?", (user["id"],))

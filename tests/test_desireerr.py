@@ -1283,6 +1283,74 @@ class FavouriteTags(Base):
         self.assertEqual(self.app.db.one("SELECT cursor FROM watches")["cursor"], "")
 
 
+class Taste(Base):
+    """Every scene's taste points, a performer's scenes sorted by them, and the preference."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.stash.find_tag = lambda tid: {"id": tid, "name": f"Tag {tid}"}
+        for tag, feeling in (("love", "love"), ("like", "like"), ("meh", "dislike"), ("no", "hate")):
+            self.app.set_tag_feeling(self.user, tag, feeling)
+        self.app.rare = {"like": 2.0}
+        tags = {"s1": ["like"], "s2": ["love", "meh"], "s3": ["love", "no"], "s4": [], "s5": ["love"]}
+        # StashDB's cards carry their tags
+        self.app.stash.listed = [dict(scene(sid), tags=[{"id": t} for t in ts]) for sid, ts in tags.items()]
+
+    def test_on_every_card(self):
+        got = self.app.browse_scenes({}, self.user)["scenes"]
+        self.assertEqual([(x["id"], x.get("taste")) for x in got],
+                         [("s1", 4), ("s2", -1), ("s3", None), ("s4", 0), ("s5", 4)])
+        self.assertEqual([x["hated"] for x in got], [False, False, True, False, False])
+        self.assertNotIn("tags", got[0])                                   # not sent
+        self.assertIn("tags", self.app.stash.listed[0])                    # StashDB's cached card stays
+        self.assertNotIn("taste", self.app.browse_scenes({}, self.admin)["scenes"][0])  # no feelings
+
+    def test_sorted_by_taste(self):
+        out = self.app.browse_scenes({"sort": "TASTE", "performers": "aaaaaaaa-1", "per_page": "2"}, self.user)
+        self.assertEqual([x["id"] for x in out["scenes"]], ["s1", "s5"])   # 4 and 4: the newest first
+        self.assertEqual((out["count"], out["newest"]), (5, False))
+        q = self.app.stash.queries[-1]
+        self.assertEqual((q["sort"], q["per_page"], q["performers"]["value"]), ("DATE", 100, ["aaaaaaaa-1"]))
+        out = self.app.browse_scenes({"sort": "TASTE", "page": "3", "per_page": "2"}, self.user)
+        self.assertEqual([x["id"] for x in out["scenes"]], ["s3"])         # the hated one last
+
+    def test_newest_pool(self):
+        self.app.stash.listed = [scene(f"{n:08d}-x") for n in range(d.TASTE_POOL + 50)]
+        out = self.app.browse_scenes({"sort": "TASTE"}, self.user)
+        self.assertEqual((out["count"], out["newest"]), (d.TASTE_POOL, d.TASTE_POOL))
+
+    def test_scene_page(self):
+        sc = dict(scene("s2"), tags=[{"id": "love", "name": "Loved"}, {"id": "meh", "name": "Meh"},
+                                     {"id": "x", "name": "Other"}])
+        self.app.stash.scenes["s2"] = sc
+        got = self.app.scene("s2", self.user)
+        self.assertEqual(got["taste"], -1)
+        self.assertEqual(got["taste_tags"], [{"id": "meh", "name": "Meh", "feeling": "dislike", "points": -5},
+                                             {"id": "love", "name": "Loved", "feeling": "love", "points": 4}])
+        self.assertNotIn("taste", self.app.scene("s2", self.admin))
+
+    def test_preference(self):
+        server = d.Server(("127.0.0.1", 0), d.Handler, self.app)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        token = self.app.new_session(self.user["id"])
+
+        def post(body):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+            conn.request("POST", "/api/prefs", json.dumps(body), {
+                "Content-Type": "application/json", "X-Requested-With": "desireerr",
+                "Cookie": f"{d.SESSION_COOKIE}={token}"})
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            return resp.status
+        self.assertEqual(self.app.session_user(token)["performer_sort"], "TASTE")   # to start with
+        self.assertEqual(post({"performer_sort": "DATE"}), 200)
+        self.assertEqual(self.app.session_user(token)["performer_sort"], "DATE")
+        self.assertEqual(post({"performer_sort": "TITLE"}), 400)
+
+
 def full_scene(sid=SCENE):
     return {**scene(sid), "details": "What happens & more", "duration": 3725, "director": "Dir",
             "tags": [{"id": "t1", "name": "Hotel"}, {"id": "t2", "name": "Interview"}],

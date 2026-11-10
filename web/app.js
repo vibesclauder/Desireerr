@@ -504,15 +504,28 @@ function progressBar(st) {
 }
 const noImg = (ic = "film") => html`<div class="noimg">${icon(ic)}</div>`;
 
+// Under a scene's title: its taste points and the tags that make them, most first.
+function tasteLine(s) {
+  if (s.taste === undefined) return "";
+  const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
+  const tags = (s.taste_tags || []).slice(0, 6);
+  return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less)">
+    ${s.taste === null ? html`<span class="points hated">${icon("ban")}</span>` : html`<span class="points">${icon("sparkle")}${s.taste}</span>`}
+    ${tags.map((t) => html`<span class="feel-${t.feeling}">${t.name} ${t.points === null ? "(hated)" : sign(t.points)}</span>`)}
+  </div>`;
+}
+
 function sceneCard(s) {
   const im = pickImage(s.images, true);
   const people = (s.performers || []).map(performerName).filter(Boolean).join(", ");
   const meta = [s.studio?.name, fmtDate(s.release_date)].filter(Boolean).join(" · ");
   // The picture opens the photo viewer (at the card's picture), the text the scene.
   const photos = (s.images || []).map((i) => i.url);
-  // Rank points, where a row is ranked: in the corner, where Request shows on hover (or
-  // beside the state, when there's nothing to request).
-  const points = s.points != null ? html`<span class="points" title="Rank points: how well it matches your taste">${icon("sparkle")}${s.points}</span>` : "";
+  // Its points in the corner, where Request shows on hover (or beside the state, when there's
+  // nothing to request): a ranked row's, else what its tags add by how you feel about them.
+  const points = s.points != null ? html`<span class="points" title="Rank points: how well it matches this scene and your taste">${icon("sparkle")}${s.points}</span>`
+    : s.hated ? html`<span class="points hated" title="It has a tag you hate">${icon("ban")}</span>`
+    : s.taste != null ? html`<span class="points" title="Your taste: what its tags add by how you feel about them">${icon("sparkle")}${s.taste}</span>` : "";
   return html`<div class="card scene-card" data-scene="${s.id}">
     <div class="thumb">
       ${im ? html`<button type="button" class="zoom-card" data-photos="${JSON.stringify(photos)}" data-start="${photos.indexOf(im)}" data-title="${s.title || ""}" aria-label="Show the picture larger">
@@ -738,6 +751,7 @@ function setFilterCount(el, n) {
 }
 
 const SORTS = [
+  ["TASTE:desc", "Your taste"],
   ["TRENDING:desc", "Trending"],
   ["DATE:desc", "Newest"],
   ["DATE:asc", "Oldest"],
@@ -900,13 +914,13 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
   };
 
   const grid = $("#b-grid", el), more = $("#b-more", el), countEl = $("#b-count", el);
-  let page = 0, total = 0, loading = false, seq = 0, shown = 0, mem = null;
+  let page = 0, total = 0, loading = false, seq = 0, shown = 0, mem = null, newest = 0;
   const HAVE = new Set(["available", "processing", "downloading", "pending"]);
 
   function draw(scenes) {
     if (f.hide_have) scenes = scenes.filter((s) => !HAVE.has(s.state?.status));
     grid.insertAdjacentHTML("beforeend", scenes.map((s) => sceneCard(s).s).join(""));
-    countEl.textContent = total ? `${total.toLocaleString()} scene${total === 1 ? "" : "s"}` : "";
+    countEl.textContent = total ? `${total.toLocaleString()} scene${total === 1 ? "" : "s"}${newest ? `, of the newest ${newest.toLocaleString()}, by your taste` : ""}` : "";
     if (!total) grid.innerHTML = html`<div class="empty" style="grid-column:1/-1">No scenes match these filters.</div>`.s;
     more.innerHTML = shown < total ? html`<button class="btn" id="b-next">Load more</button>`.s : "";
   }
@@ -927,6 +941,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, fixedNames = {}, defaults = {
       if (my !== seq || !ctx.alive()) return;
       page = res.page;
       total = res.count;
+      newest = res.newest || 0;
       shown += res.scenes.length;
       draw(res.scenes);
       mem.items.push(...res.scenes);
@@ -1202,6 +1217,7 @@ async function viewScene(view, id, ctx) {
         <div class="hero-info">
           <div class="kicker">${s.studio ? html`<a href="/studio/${s.studio.id}">${s.studio.name}</a>` : ""}${s.studio?.parent ? html`<span style="color:var(--muted)">· ${s.studio.parent.name}</span>` : ""}</div>
           <h1>${s.title || "Untitled"}</h1>
+          ${tasteLine(s)}
           <div class="facts">${[fmtDate(s.release_date), fmtDur(s.duration), s.code].filter(Boolean).map((x) => html`<span>${x}</span>`)}</div>
           <div>${statePill(s.state)}</div>
           ${s.state.status === "downloading" ? html`<div class="dl-bar"><i style="width:${s.state.progress || 0}%"></i></div><div class="note">${s.state.timeleft ? `About ${s.state.timeleft} left` : ""}</div>` : ""}
@@ -1310,7 +1326,7 @@ async function viewPerformer(view, id, ctx) {
     </div>
   </div>`.s;
   $(".page", view).addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(photos, +b.dataset.photo, p.name); });
-  await sceneBrowser($("#browser", view), ctx, { fixed: { performers: [id] }, fixedNames: { performers: [{ id, name: p.name }] } });
+  await sceneBrowser($("#browser", view), ctx, { fixed: { performers: [id] }, fixedNames: { performers: [{ id, name: p.name }] }, defaults: { sort: me.performer_sort === "DATE" ? "DATE" : "TASTE", dir: "desc" } });
 }
 
 async function viewStudio(view, id, ctx) {
@@ -1639,6 +1655,14 @@ async function viewSettings(view, ctx) {
       <div class="btns" style="align-self:end"><button class="btn primary">Change password</button></div>
     </form>
   </section>`;
+  const taste = html`<section class="panel">
+    <h2>Your taste</h2>
+    <p class="lede">Scene cards show what their tags add by how you feel about them (Love, Like, Dislike, Hate on any tag), a rare tag more than a common one.</p>
+    <label class="field" style="max-width:340px"><span>A performer's scenes, sorted by</span><select class="input" id="pf-sort">
+      <option value="TASTE" ${me.performer_sort !== "DATE" ? "selected" : ""}>Your taste (of the newest 500)</option>
+      <option value="DATE" ${me.performer_sort === "DATE" ? "selected" : ""}>Newest</option>
+    </select></label>
+  </section>`;
   const privacy = html`<section class="panel">
     <h2>On this device</h2>
     <label class="check"><input type="checkbox" id="pv-covers" ${document.body.classList.contains("hide-covers") ? "checked" : ""}> Blur covers until I point at them (the eye button in the top bar does the same)</label>
@@ -1654,7 +1678,7 @@ async function viewSettings(view, ctx) {
     </section>`);
     parts.push(html`<section class="panel">
       <h2>Whisparr</h2>
-      <p class="lede">Approved requests are added to Whisparr and searched for; following a performer or studio monitors their new scenes there.</p>
+      <p class="lede">Approved requests are added to Whisparr and searched for.</p>
       ${s.whisparr_error ? html`<div class="error-box">${s.whisparr_error}</div>` : ""}
       <form class="form-grid" id="wh-form">
         <label class="field"><span>Address</span><input class="input" name="whisparr_url" value="${s.whisparr_url}" placeholder="http://localhost:6969"></label>
@@ -1723,7 +1747,7 @@ async function viewSettings(view, ctx) {
       </form>
     </section>`);
   }
-  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>${parts}${account}${privacy}</div>`.s;
+  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>${parts}${account}${taste}${privacy}</div>`.s;
 
   const formData = (form) => Object.fromEntries(new FormData(form).entries());
   const submit = (id, fn) => {
@@ -1787,6 +1811,13 @@ async function viewSettings(view, ctx) {
     toast("Password changed. Other devices are signed out.");
   });
   $("#pv-covers", view).onchange = (e) => setCovers(e.target.checked);
+  $("#pf-sort", view).onchange = async (e) => {
+    try {
+      await api("prefs", { method: "POST", body: { performer_sort: e.target.value } });
+      me.performer_sort = e.target.value;
+      toast("Saved.");
+    } catch (err) { toast(err.message, true); }
+  };
   // On this render's page: listeners on #view itself would pile up across visits (and a
   // second one would delete a user without asking).
   const page = $(".page", view);
