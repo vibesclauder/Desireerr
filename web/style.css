@@ -311,18 +311,15 @@ textarea.input { height: auto; padding: 10px 12px; }
 .hero-info .facts { color: var(--fg-2); display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 14px; font-variant-numeric: tabular-nums; }
 .hero-info .facts span + span::before { content: "·"; margin-right: 14px; color: var(--muted); }
 .hero.person .hero-body { grid-template-columns: 220px minmax(0, 1fr); }
-/* A performer's photos: small, beside the name, scrolling if there are many. */
-.hero.person.with-photos .hero-body { grid-template-columns: 220px minmax(0, 1fr) auto; }
-.hero-photos { display: grid; grid-template-columns: repeat(4, 58px); gap: 6px; align-content: end; align-self: end; max-height: 330px; overflow-y: auto; scrollbar-width: thin; }
-.hero-photos .thumb-btn { border-radius: 8px; }
-@media (max-width: 1100px) { .hero-photos { grid-template-columns: repeat(3, 54px); } }
+/* A performer's photos: a small reel above the name, scrolling sideways if there are many. */
+.hero-photos { display: grid; grid-auto-flow: column; grid-auto-columns: 48px; gap: 6px; justify-content: start; overflow-x: auto; overflow-y: hidden; padding: 2px 2px 4px; scrollbar-width: thin; }
+.hero-photos .thumb-btn { border-radius: 7px; }
+.hero-photos .card:hover { transform: none; }
 .hero.compact { min-height: 0; padding-top: 28px; }
 @media (max-width: 760px) {
   .hero { margin: 0 calc(-1 * max(16px, env(safe-area-inset-left))); padding: 24px max(16px, env(safe-area-inset-left)) 4px; min-height: 0; }
   .hero-body, .hero.person .hero-body { grid-template-columns: 1fr; gap: 18px; }
   .hero.person .hero-poster { max-width: 180px; }
-  .hero.person.with-photos .hero-body { grid-template-columns: 1fr; }
-  .hero-photos { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 54px; max-height: none; overflow-x: auto; overflow-y: hidden; }
 }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 28px; align-items: start; }
 @media (max-width: 1100px) { .detail-grid { grid-template-columns: 1fr; } }

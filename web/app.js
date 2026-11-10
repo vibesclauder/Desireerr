@@ -1345,13 +1345,14 @@ async function viewPerformer(view, id, ctx) {
   ].filter(([, v]) => v && String(v).trim());
   const photos = p.images || [];
   view.innerHTML = html`<div class="page flush">
-    <section class="hero person ${photos.length > 1 ? "with-photos" : ""}">
+    <section class="hero person">
       <div class="backdrop">${back && back !== im ? html`<img src="${imgUrl(back, 1280)}" alt="">` : ""}</div>
       <div class="hero-body">
         ${im ? html`<button type="button" class="hero-poster portrait zoomable" data-photo="${photos.findIndex((x) => x.url === im)}" aria-label="Show the photos">
           <img src="${imgUrl(im, 800)}" alt="">${photos.length > 1 ? html`<span class="photo-count">${icon("photos")}${photos.length}</span>` : ""}</button>`
         : html`<div class="hero-poster portrait">${noImg("users")}</div>`}
         <div class="hero-info">
+          ${photos.length > 1 ? html`<div class="hero-photos" aria-label="Photos">${photos.map((ph, i) => html`<button type="button" class="card thumb-btn" data-photo="${i}" aria-label="Photo ${i + 1} of ${photos.length}"><div class="thumb"><img src="${imgUrl(ph.url, 200)}" alt="" loading="lazy" decoding="async"></div></button>`)}</div>` : ""}
           <div class="kicker">${[titleCase(p.gender), p.country].filter(Boolean).join(" · ")}</div>
           <h1>${p.name}${p.death_date ? html` <span class="dagger" title="Died ${fmtDate(p.death_date)}">†</span>` : ""}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
@@ -1359,7 +1360,6 @@ async function viewPerformer(view, id, ctx) {
           <div class="btns">${followButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
           <div>${performerFeelings(p)}</div>
         </div>
-        ${photos.length > 1 ? html`<div class="hero-photos" aria-label="Photos">${photos.map((ph, i) => html`<button type="button" class="card thumb-btn" data-photo="${i}" aria-label="Photo ${i + 1} of ${photos.length}"><div class="thumb"><img src="${imgUrl(ph.url, 200)}" alt="" loading="lazy" decoding="async"></div></button>`)}</div>` : ""}
       </div>
     </section>
     <div id="similar-performers"></div>
