@@ -90,6 +90,15 @@ DISCOVER_POOL = 100          # "New with tags you love or like" picks from this 
 RARITY_TYPICAL = 30000
 RARITY_MIN, RARITY_MAX = 0.25, 3.0
 TAG_COUNT_TTL = 7 * 86400
+# Performers in the taste score: a favourite or followed one adds PERFORMER_POINTS (a loved tag's
+# worth), one whose scenes you requested up to that, by how many and how lately (half of it after
+# AFFINITY_HALF_LIFE), one you want less of takes off PERFORMER_DISLIKE. Several add up, unless
+# the video is cut together from several scenes (MULTI_SCENE_TAGS): then only the best and worst.
+PERFORMER_POINTS = 4
+PERFORMER_DISLIKE = 4
+AFFINITY_HALF_LIFE = 365 * 86400
+MULTI_SCENE_TAGS = {"3da5244d-b0f9-48af-b5e1-d46ecedb4308",   # Compilation
+                    "d9ea7d4e-57ea-4315-9f21-57e98bf42457"}   # Multiple Scenes
 TASTE_POOL = 500             # sorted by taste: this many of the newest matching scenes
 TASTE_TTL = 600
 
@@ -263,6 +272,14 @@ CREATE TABLE IF NOT EXISTS tag_feelings (   -- StashDB has no tag favourites: ou
     feeling INTEGER NOT NULL,                -- FEELINGS: 2 love, 1 like, -1 dislike, -2 hate
     created INTEGER NOT NULL,
     PRIMARY KEY (user_id, tag_id)
+);
+CREATE TABLE IF NOT EXISTS performer_feelings (  -- per user: -1, fewer of their scenes
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    performer_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    feeling INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    PRIMARY KEY (user_id, performer_id)
 );
 CREATE TABLE IF NOT EXISTS tag_scenes (     -- how many StashDB scenes have each tag
     tag_id TEXT PRIMARY KEY,                 -- '': all of StashDB's scenes
@@ -1262,11 +1279,26 @@ def recommendable(weights, outweigh=True):
     return not hated and (not disliked or outweigh and liked > disliked)
 
 
-def taste(weights):
+def taste(weights, performers=0):
     """A scene's taste points, from weigh_tags: what its loved and liked tags add less what its
-    disliked ones take off; None with a hated tag."""
+    disliked ones take off, plus what its PERFORMERS add (see performer_points); None with a
+    hated tag."""
     liked, _, disliked, hated = weights
-    return None if hated else round(liked - disliked)
+    return None if hated else round(liked - disliked + performers)
+
+
+def performer_points(people, tags, perf):
+    """What a scene's PEOPLE (performer IDs) add by PERF (performer ID -> (points, why)): all of
+    them, or in a video of several scenes (TAGS has one of MULTI_SCENE_TAGS) the best one and the
+    worst one."""
+    values = [perf[p][0] for p in set(people) if p in perf]
+    if not MULTI_SCENE_TAGS & set(tags):
+        return sum(values)
+    return max([v for v in values if v > 0], default=0) + min([v for v in values if v < 0], default=0)
+
+
+def card_people(sc):
+    return [p["performer"]["id"] for p in sc.get("performers") or [] if p.get("performer")]
 
 
 def id_list(value):
@@ -1388,16 +1420,18 @@ class App:
     # -- status -------------------------------------------------------------------------
     def annotate(self, scenes, user=None):
         """Copies of SCENES with their request state, from Whisparr and our own requests, and
-        with a USER who has tag feelings, their "taste" (see taste; "hated" if None). Without
-        their tags: the page doesn't need them."""
+        with a USER who has tag or performer feelings, their "taste" (see taste; "hated" if
+        None). Without their tags: the page doesn't need them."""
         scenes = [dict(s) for s in scenes if s]
         if not scenes:
             return scenes
-        feel = self.feelings(user)
-        if feel:
+        feel, perf = self.feelings(user), self.performer_taste(user)
+        if feel or perf:
             rare, tags = self.rarities(), self.card_tags(scenes)
             for s in scenes:
-                s["taste"] = taste(weigh_tags(tags.get(s["id"], ()), feel, rare=rare))
+                have = tags.get(s["id"], ())
+                s["taste"] = taste(weigh_tags(have, feel, rare=rare),
+                                   performer_points(card_people(s), have, perf))
                 s["hated"] = s["taste"] is None
         for s in scenes:
             s.pop("tags", None)
@@ -1860,7 +1894,7 @@ class App:
 
     def new_with_favourites(self, user, ttl=300):
         """Discover's row: the newest scenes with the favourite performers (StashDB favourites
-        and those Whisparr follows, as under a scene), none with a tag the user hates or
+        and those the user follows, as under a scene), none with a tag the user hates or
         dislikes."""
         favs = self.favourite_performers(user)
         if not favs:
@@ -1897,9 +1931,10 @@ class App:
         weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare) for sc in scenes}
         kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
         if rank:  # sorted is stable: the newest first among equals
-            points = {sid: liked - disliked for sid, (liked, _, disliked, _) in weights.items()}
-            kept = [dict(sc, points=round(points[sc["id"]])) for sc in
-                    sorted(kept, key=lambda sc: -points[sc["id"]])]
+            perf = self.performer_taste(user)
+            points = {sc["id"]: taste(weights[sc["id"]], performer_points(
+                card_people(sc), tags.get(sc["id"], ()), perf)) for sc in kept}
+            kept = sorted(kept, key=lambda sc: -points[sc["id"]])
         return kept
 
     def recent_library(self):
@@ -1919,18 +1954,26 @@ class App:
         if scene["request"]:
             scene["state"] = scene["request"]["state"]
         scene["stashdb_url"] = f"{STASHDB_WEB}/scenes/{scene_id}"
-        feel = self.feelings(user)
-        if feel:
+        feel, perf = self.feelings(user), self.performer_taste(user)
+        if feel or perf:
             scene = dict(scene)  # StashDB's answer is cached
             rare = self.rarities()
-            weighed, names = [], {v: k for k, v in FEELINGS.items()}
+            tags = [t["id"] for t in scene.get("tags") or []]
+            parts, names = [], {v: k for k, v in FEELINGS.items()}
             for t in scene.get("tags") or []:
                 points = weigh_tags([t["id"]], feel, rare=rare)
                 if feel.get(t["id"], 0):
-                    weighed.append({"id": t["id"], "name": t["name"], "feeling": names[feel[t["id"]]],
-                                    "points": None if points[3] else round(points[0] - points[2], 1)})
-            scene["taste"] = taste(weigh_tags([t["id"] for t in scene.get("tags") or []], feel, rare=rare))
-            scene["taste_tags"] = sorted(weighed, key=lambda t: -abs(t["points"] if t["points"] is not None else 99))
+                    parts.append({"kind": "tag", "id": t["id"], "name": t["name"], "feeling": names[feel[t["id"]]],
+                                  "points": None if points[3] else round(points[0] - points[2], 1)})
+            for p in scene.get("performers") or []:
+                pid = p["performer"]["id"]
+                if pid in perf and pid not in {x["id"] for x in parts}:
+                    points, why = perf[pid]
+                    parts.append({"kind": "performer", "id": pid, "name": p.get("as") or p["performer"]["name"],
+                                  "why": why, "points": points})
+            scene["taste"] = taste(weigh_tags(tags, feel, rare=rare), performer_points(card_people(scene), tags, perf))
+            scene["taste_parts"] = sorted(parts, key=lambda t: -abs(t["points"] if t["points"] is not None else 99))
+            scene["taste_several"] = bool(MULTI_SCENE_TAGS & set(tags))  # performers: best and worst only
         return scene
 
     def similar(self, scene_id, user=None):
@@ -1963,7 +2006,9 @@ class App:
         rare = self.rarities()
         action.sort(key=lambda t: (-feel.get(t, 0), -rare.get(t, 1.0)))
         cast = list(dict.fromkeys(p["performer"]["id"] for p in scene.get("performers") or []))
-        favs = self.favourite_performers(user)
+        perf = self.performer_taste(user)
+        less = {p for p, (points, _) in perf.items() if points < 0}
+        favs = self.favourite_performers(user) - less
 
         def people(sc):
             return {p["performer"]["id"] for p in sc.get("performers") or []}
@@ -2050,10 +2095,12 @@ class App:
 
         def inner_score(sc):
             return (SIMILAR_FAV_HERE * len(people(sc) & favs_here)
-                    + SIMILAR_FAV_PERFORMER * len(people(sc) & favs - favs_here) + tag_score(sc))
+                    + SIMILAR_FAV_PERFORMER * len(people(sc) & favs - favs_here) + tag_score(sc)
+                    - PERFORMER_DISLIKE * len(people(sc) & less))
 
         def outer_score(sc):
-            return SIMILAR_PERFORMER * len(people(sc) & others_here) + tag_score(sc)
+            return (SIMILAR_PERFORMER * len(people(sc) & others_here) + tag_score(sc)
+                    - PERFORMER_DISLIKE * len(people(sc) & less))
         rows = [("inner", "Similar scenes with favourite performers", "", ranked(inner, inner_score)),
                 ("discover", "Discover similar scenes", "", ranked(outer, outer_score)),
                 ("together", "Together again", "Two or more of this cast in another scene", again)]
@@ -2063,6 +2110,11 @@ class App:
     def favourite_performers(self, user=None):
         """StashDB's favourite performers and the ones the user follows: the inner circle."""
         ids = {f["id"] for f in self.follows(user, "performer")} if user else set()
+        return ids | self.stash_favourites()
+
+    def stash_favourites(self):
+        """StashDB's favourite performers' IDs (none if it can't say)."""
+        ids = set()
         try:
             for page in range(1, 4):
                 res = self.stash.query_performers({"page": page, "per_page": 100, "sort": "NAME",
@@ -2080,7 +2132,66 @@ class App:
             raise ApiError(404, "StashDB has no performer with that ID.")
         perf["stashdb_url"] = f"{STASHDB_WEB}/performers/{pid}"
         perf["follow"] = self.follow_state(user, "performer", pid)
+        perf["less"] = pid in self.performers_less(user)
         return perf
+
+    def performers_less(self, user):
+        """The performers the user wants fewer scenes of: {ID: name}."""
+        if not user:
+            return {}
+        return {r["performer_id"]: r["name"] for r in self.db.all(
+            "SELECT performer_id, name FROM performer_feelings WHERE user_id = ? AND feeling < 0",
+            (user["id"],))}
+
+    def set_performer_less(self, user, pid, less):
+        """Fewer of their scenes (LESS), or as they are: their scenes rank lower in the user's
+        taste, nothing is hidden."""
+        if less:
+            found = self.stash.find_performer(pid)
+            if not found:
+                raise ApiError(404, "StashDB has no performer with that ID.")
+            self.db.run("INSERT OR REPLACE INTO performer_feelings(user_id, performer_id, name, feeling, created) "
+                        "VALUES (?, ?, ?, -1, ?)", (user["id"], pid, found["name"], now()))
+        else:
+            self.db.run("DELETE FROM performer_feelings WHERE user_id = ? AND performer_id = ?",
+                        (user["id"], pid))
+        self.forget_discover(user)
+        return {"less": bool(less)}
+
+    def learned_performers(self, user, at=None):
+        """Performer ID -> how much the user likes them by the scenes they requested themselves
+        (not those saved searches made, nor declined ones, nor videos of several scenes): each
+        counts 1, halved every AFFINITY_HALF_LIFE; 1 - 0.5 ** (sum / 2), so 0.29 after one, 0.65
+        after three, 0.88 after six."""
+        at = at or time.time()
+        rows = self.db.all("SELECT scene_id, created FROM requests WHERE user_id = ? AND status != 'declined' "
+                           "AND via = '' AND watch_id IS NULL", (user["id"],))
+        if not rows:
+            return {}
+        try:
+            cards = {sc["id"]: sc for sc in self.stash.find_scenes(sorted({r["scene_id"] for r in rows}))}
+        except ApiError:
+            return {}
+        sums = {}
+        for r in rows:
+            sc = cards.get(r["scene_id"])
+            if not sc or MULTI_SCENE_TAGS & {t["id"] for t in sc.get("tags") or []}:
+                continue
+            for p in set(card_people(sc)):
+                sums[p] = sums.get(p, 0) + 0.5 ** (max(0, at - r["created"]) / AFFINITY_HALF_LIFE)
+        return {p: 1 - 0.5 ** (n / 2) for p, n in sums.items()}
+
+    def performer_taste(self, user):
+        """Performer ID -> (points, why) for the user's taste: favourites and followed ones
+        PERFORMER_POINTS, the ones they requested scenes of up to that (learned_performers), the
+        ones they want less of -PERFORMER_DISLIKE (whatever else they are)."""
+        if not user:
+            return {}
+        out = {p: (round(PERFORMER_POINTS * a, 1), "requested") for p, a in self.learned_performers(user).items()}
+        out.update((p, (PERFORMER_POINTS, "favourite")) for p in self.stash_favourites())
+        out.update((f["id"], (PERFORMER_POINTS, "followed")) for f in self.follows(user, "performer"))
+        out.update((p, (-PERFORMER_DISLIKE, "less")) for p in self.performers_less(user))
+        return out
 
     def studio(self, sid, user):
         studio = self.stash.find_studio(sid)
@@ -2863,6 +2974,12 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, app.check_watch(wid), None
 
         # -- account --
+        if key == ("POST", "performer-less"):
+            body = self.body_json()
+            pid = str(body.get("id", ""))
+            if not id_list(pid):
+                raise ApiError(400, "Which performer?")
+            return 200, app.set_performer_less(user, pid, bool(body.get("less"))), None
         if key == ("POST", "prefs"):
             body = self.body_json()
             if body.get("performer_sort") not in ("TASTE", "DATE"):

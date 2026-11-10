@@ -505,14 +505,17 @@ function progressBar(st) {
 }
 const noImg = (ic = "film") => html`<div class="noimg">${icon(ic)}</div>`;
 
-// Under a scene's title: its taste points and the tags that make them, most first.
+// Under a scene's title: its taste points and the tags and performers that make them, most first.
+const WHY = { favourite: "favourite", followed: "followed", requested: "from your requests", less: "less of them" };
 function tasteLine(s) {
   if (s.taste === undefined) return "";
   const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
-  const tags = (s.taste_tags || []).slice(0, 6);
-  return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less)">
+  const parts = (s.taste_parts || []).slice(0, 8);
+  return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less), and its performers: favourites and followed ones, the ones you request, and the ones you want less of${s.taste_several ? ". It's cut together from several scenes, so only the best and the worst performer count." : ""}">
     ${s.taste === null ? html`<span class="points hated">${icon("ban")}</span>` : html`<span class="points">${icon("sparkle")}${s.taste}</span>`}
-    ${tags.map((t) => html`<span class="feel-${t.feeling}">${t.name} ${t.points === null ? "(hated)" : sign(t.points)}</span>`)}
+    ${parts.map((t) => t.kind === "performer"
+      ? html`<span class="${t.points < 0 ? "feel-dislike" : "feel-like"}">${t.name} ${sign(t.points)} <small>(${WHY[t.why]})</small></span>`
+      : html`<span class="feel-${t.feeling}">${t.name} ${t.points === null ? "(hated)" : sign(t.points)}</span>`)}
   </div>`;
 }
 
@@ -527,7 +530,7 @@ function sceneCard(s) {
   const chips = [
     s.points != null ? html`<span class="points similar" title="Similarity to this scene: the performers and tags they share, and the tags you love or like">${icon("similar")}${s.points}</span>` : "",
     s.hated ? html`<span class="points hated" title="It has a tag you hate">${icon("ban")}</span>`
-      : s.taste != null ? html`<span class="points" title="Your taste: what its tags add by how you feel about them">${icon("sparkle")}${s.taste}</span>` : "",
+      : s.taste != null ? html`<span class="points" title="Your taste: what its tags and performers add by how you feel about them">${icon("sparkle")}${s.taste}</span>` : "",
   ].filter(Boolean);
   const points = chips.length ? html`<div class="scores ${canRequest(s.state) ? "" : "beside"}">${chips}</div>` : "";
   return html`<div class="card scene-card" data-scene="${s.id}">
@@ -662,6 +665,11 @@ document.addEventListener("click", async (e) => {
       const fav = b.dataset.favorite === "1";
       await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
       toast(fav ? "Added to your StashDB favourites. Nothing is downloaded for it; use them as a filter." : "Removed from your StashDB favourites.");
+      render();
+    } else if (act === "less") {
+      const less = b.dataset.less === "1";
+      await api("performer-less", { method: "POST", body: { id: b.dataset.id, less } });
+      toast(less ? "Their scenes rank lower in your taste (−4 each). Nothing is hidden." : "Their scenes count as before.");
       render();
     } else if (act === "follow") {
       const follow = b.dataset.follow === "1";
@@ -1270,6 +1278,13 @@ function favoriteButton(kind, item) {
     : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="Add to your StashDB favourites: a filter on Discover, Scenes and the lists. Nothing is downloaded for it.">${icon("heart")}Add to favourites</button>`;
 }
 
+// Fewer of a performer's scenes: they rank lower in your taste, nothing is hidden.
+function lessButton(p) {
+  return p.less
+    ? html`<button class="btn on-bad" data-act="less" data-id="${p.id}" data-less="0" title="Their scenes rank lower in your taste (−4 each). Click to count them as before.">${icon("thumbDown")}Less of them</button>`
+    : html`<button class="btn ghost" data-act="less" data-id="${p.id}" data-less="1" title="Rank their scenes lower in your taste (−4 each), say for someone in everything you don't care for. Nothing is hidden.">${icon("thumbDown")}Less of them</button>`;
+}
+
 function followButton(kind, item) {
   const f = item.follow || {};
   if (f.error) return html`<span class="note bad-text">${f.error}</span>`;
@@ -1316,7 +1331,7 @@ async function viewPerformer(view, id, ctx) {
           <h1>${p.name}${p.death_date ? html` <span class="dagger" title="Died ${fmtDate(p.death_date)}">†</span>` : ""}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
-          <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
+          <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}${lessButton(p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
         </div>
       </div>
     </section>

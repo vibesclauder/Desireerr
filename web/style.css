@@ -212,6 +212,7 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .btn.danger { background: transparent; border-color: rgba(239,68,68,.6); color: #fca5a5; }
 .btn.danger:hover { background: rgba(239,68,68,.12); }
 .btn.ghost { background: transparent; }
+.btn.on-bad { color: #fca5a5; border-color: rgba(239,68,68,.45); background: rgba(239,68,68,.12); }
 .btn.small { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 8px; }
 .btn.tiny { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 99px; }
 .btn[disabled] { opacity: .55; cursor: default; }
@@ -301,6 +302,7 @@ textarea.input { height: auto; padding: 10px 12px; }
 .taste-line .points svg { width: 13px; height: 13px; }
 .taste-line .feel-love, .taste-line .feel-like { color: var(--accent-hi); }
 .taste-line .feel-dislike, .taste-line .feel-hate { color: #fca5a5; }
+.taste-line small { color: var(--muted); font-size: 12px; }
 .hero-info .facts { color: var(--fg-2); display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 14px; font-variant-numeric: tabular-nums; }
 .hero-info .facts span + span::before { content: "·"; margin-right: 14px; color: var(--muted); }
 .hero.person .hero-body { grid-template-columns: 220px minmax(0, 1fr); }

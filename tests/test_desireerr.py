@@ -62,6 +62,11 @@ class FakeStash:
     def find_tag(self, tid):
         return {"id": tid, "name": f"Tag {tid[-1]}"} if tid.startswith("aaaaaaaa") else None
 
+    favourites = []           # StashDB's favourite performers
+
+    def query_performers(self, inp):
+        return {"count": len(self.favourites), "performers": [{"id": i} for i in self.favourites]}
+
 
 SCENE = "11111111-2222-3333-4444-555555555555"
 OTHER = "99999999-8888-7777-6666-555555555555"
@@ -568,8 +573,8 @@ class Similar(unittest.TestCase):
         self.listed = [self.card(n) for n in ("n1", "n2", "n3", "n4", "n5", "n6", "n7")]  # newest first
         self.app.stash.tags = {"n1": ["D"], "n2": ["A"], "n3": ["A", "E"], "n4": ["A", "D"],
                                "n5": ["H", "A"], "n6": ["D"], "n7": ["A", "D", "E"]}
-        got = [(sc["id"], sc["points"]) for sc in self.app.new_with_loved_tags({"id": 1})]
-        self.assertEqual(got, [("n4", 6), ("n2", 4), ("n1", 2), ("n6", 2), ("n7", 1)])  # n3 4 < 5; n5 hated
+        got = [sc["id"] for sc in self.app.new_with_loved_tags({"id": 1})]
+        self.assertEqual(got, ["n4", "n2", "n1", "n6", "n7"])  # 6, 4, 2, 2, 1; n3 4 < 5; n5 hated
         self.assertEqual((self.queries[-1]["tags"], self.queries[-1]["sort"], self.queries[-1]["per_page"]),
                          ({"value": ["A", "D"], "modifier": "INCLUDES"}, "DATE", d.DISCOVER_POOL))
         self.app.fav_tag_ids = lambda user: []
@@ -1325,9 +1330,58 @@ class Taste(Base):
         self.app.stash.scenes["s2"] = sc
         got = self.app.scene("s2", self.user)
         self.assertEqual(got["taste"], -1)
-        self.assertEqual(got["taste_tags"], [{"id": "meh", "name": "Meh", "feeling": "dislike", "points": -5},
-                                             {"id": "love", "name": "Loved", "feeling": "love", "points": 4}])
+        self.assertEqual(got["taste_parts"], [
+            {"kind": "tag", "id": "meh", "name": "Meh", "feeling": "dislike", "points": -5},
+            {"kind": "tag", "id": "love", "name": "Loved", "feeling": "love", "points": 4}])
         self.assertNotIn("taste", self.app.scene("s2", self.admin))
+        self.app.stash.favourites = ["p1"]
+        sc["performers"] = [{"as": None, "performer": {"id": "p1", "name": "Ann"}}]
+        got = self.app.scene("s2", self.user)
+        self.assertEqual(got["taste"], 3)
+        self.assertIn({"kind": "performer", "id": "p1", "name": "Ann", "why": "favourite", "points": 4},
+                      got["taste_parts"])
+        self.assertEqual(self.app.scene("s2", self.admin)["taste"], 4)   # a favourite: everyone's
+
+    def people(self, *ids, tags=()):
+        return {"id": "c", "performers": [{"as": None, "performer": {"id": i}} for i in ids],
+                "tags": [{"id": t} for t in tags]}
+
+    def test_performers(self):
+        app = self.app
+        app.stash.favourites = ["fav"]
+        app.stash.find_performer = lambda pid: {"id": pid, "name": pid.upper()}
+        app.set_performer_less(self.user, "aaaaaaaa-less", True)
+        perf = app.performer_taste(self.user)
+        self.assertEqual((perf["fav"], perf["aaaaaaaa-less"]), ((4, "favourite"), (-4, "less")))
+        points = lambda *ids, tags=(): d.performer_points(ids, tags, perf)
+        self.assertEqual(points("fav", "aaaaaaaa-less", "x"), 0)
+        perf["fav2"] = (4, "followed")
+        self.assertEqual(points("fav", "fav2"), 8)                                  # together: add up
+        self.assertEqual(points("fav", "fav2", "aaaaaaaa-less", tags=[next(iter(d.MULTI_SCENE_TAGS))]), 0)  # best, worst
+        self.assertTrue(app.performer("aaaaaaaa-less", self.user)["less"])
+        app.set_performer_less(self.user, "aaaaaaaa-less", False)
+        self.assertNotIn("aaaaaaaa-less", app.performer_taste(self.user))
+        app.set_performer_less(self.user, "fav", True)                              # wins over a favourite
+        self.assertEqual(app.performer_taste(self.user)["fav"], (-4, "less"))
+
+    def test_learned_from_requests(self):
+        app, day = self.app, 86400
+        cards = {"r1": self.people("ann", "bob"), "r2": self.people("ann"), "r3": self.people("ann"),
+                 "r4": self.people("cid", tags=d.MULTI_SCENE_TAGS), "r5": self.people("dee"), "r6": self.people("eve")}
+        for sid, c in cards.items():
+            c["id"] = sid
+        app.stash.find_scenes = lambda ids: [cards[i] for i in ids if i in cards]
+        now = 1000 * day
+        for sid, age, extra in (("r1", 0, {}), ("r2", 0, {}), ("r3", 0, {}), ("r4", 0, {}),
+                                ("r5", 365, {}), ("r6", 0, {"status": "declined"})):
+            app.db.run("INSERT INTO requests(scene_id, user_id, status, created) VALUES (?, ?, ?, ?)",
+                       (sid, self.user["id"], extra.get("status", "approved"), now - age * day))
+        app.db.run("INSERT INTO requests(scene_id, user_id, status, created, via) VALUES ('r2', ?, 'approved', ?, 'w')",
+                   (self.user["id"], now))   # a saved search's: not counted
+        got = {p: round(a, 2) for p, a in app.learned_performers(self.user, at=now).items()}
+        # ann: three of hers 0.65; bob one 0.29; dee one, a year ago (half) 0.16; cid: a compilation;
+        # eve: declined
+        self.assertEqual(got, {"ann": 0.65, "bob": 0.29, "dee": 0.16})
 
     def test_preference(self):
         server = d.Server(("127.0.0.1", 0), d.Handler, self.app)
