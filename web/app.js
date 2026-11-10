@@ -248,6 +248,7 @@ const ICONS = {
   alert: '<path d="M12 3 2 20h20zM12 9v5M12 17h.01"/>',
   play: '<path d="M7 4.5v15l12.5-7.5z"/>',
   bookmark: '<path d="M6 3.5h12v17l-6-4.2-6 4.2z"/>',
+  sparkle: '<path fill="currentColor" stroke="none" d="M12 2c.8 5.6 4.4 9.2 10 10-5.6.8-9.2 4.4-10 10-.8-5.6-4.4-9.2-10-10 5.6-.8 9.2-4.4 10-10z"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/>',
 };
 const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`);
@@ -511,7 +512,7 @@ function sceneCard(s) {
   const photos = (s.images || []).map((i) => i.url);
   // Rank points, where a row is ranked: in the corner, where Request shows on hover (or
   // beside the state, when there's nothing to request).
-  const points = s.points != null ? html`<span class="points" title="Rank points">${s.points}</span>` : "";
+  const points = s.points != null ? html`<span class="points" title="Rank points: how well it matches your taste">${icon("sparkle")}${s.points}</span>` : "";
   return html`<div class="card scene-card" data-scene="${s.id}">
     <div class="thumb">
       ${im ? html`<button type="button" class="zoom-card" data-photos="${JSON.stringify(photos)}" data-start="${photos.indexOf(im)}" data-title="${s.title || ""}" aria-label="Show the picture larger">
