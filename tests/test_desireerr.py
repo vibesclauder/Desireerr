@@ -513,6 +513,20 @@ class Similar(unittest.TestCase):
         self.app.stash.tags = {"y2": ["B", "C"], "y3": ["A"], "y4": ["D"]}
         self.assertEqual(self.rows(None)["discover"], ["y2", "y3", "y4"])  # 7, 1, 0
 
+    def test_rare_tags_weigh_more(self):
+        self.listed = [self.card("y1"), self.card("y2"), self.card("y3")]
+        self.app.stash.tags = {"y1": ["A"], "y2": ["D"], "y3": ["B"]}
+        self.app.rare = {"A": 0.25, "D": 3.0, "B": 2.0, "E": 0.25}
+        # y2: D liked, rare: 2 * 3; y1: A liked and here too, but on every other scene: 5 / 4;
+        # y3: B neutral, here too: 1 * 2
+        self.assertEqual(self.rows()["discover"], ["y2", "y3", "y1"])
+        self.assertTrue(self.asked(None, ["A", "B"]))  # the liked one first: rarity comes next
+        self.feel = {"D": 1, "E": -1}
+        self.app.stash.tags = {"y1": ["D", "E"], "y2": ["E"], "y3": ["B"]}
+        # a common disliked tag takes off as much: y1 6 - 5
+        self.assertEqual(self.rows()["discover"], ["y3", "y1"])
+        self.assertTrue(self.asked(None, ["B", "A"]))  # among the neutral ones, the rarest first
+
     def test_disliked_tags(self):
         self.listed = [self.card("x1", "w1"), self.card("x2", "w1"),
                        self.card("y1"), self.card("y2"), self.card("y3"), self.card("y4")]
@@ -684,6 +698,51 @@ class TagFeelings(unittest.TestCase):
         self.assertEqual(db.all("SELECT tag_id, feeling FROM tag_feelings ORDER BY tag_id"),
                          [{"tag_id": "d", "feeling": -1}, {"tag_id": "f", "feeling": 1}])
         self.assertEqual(db.all("SELECT name FROM sqlite_master WHERE name LIKE '%_tags'"), [])
+
+
+class Rarity(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = make_app(self.tmp.name)
+        self.calls = []
+
+        def scene_counts(ids, ttl=0):
+            self.calls.append(ids)
+            return {t: {None: 1_000_000, "common": 333_000, "typical": 30_000, "rare": 50,
+                        "gone": 0}[t] for t in ids}
+        self.app.stash.scene_counts = scene_counts
+        self.app.stash.tag_ids = lambda: ["common", "typical", "rare", "gone"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_rarity(self):
+        self.assertEqual(d.rarity(30_000, 1_000_000), 1.0)
+        self.assertAlmostEqual(d.rarity(333_000, 1_000_000), 0.31, places=2)
+        self.assertAlmostEqual(d.rarity(2_000, 1_000_000), 1.77, places=2)
+        self.assertEqual(d.rarity(900_000, 1_000_000), d.RARITY_MIN)
+        self.assertEqual(d.rarity(0, 1_000_000), d.RARITY_MAX)
+        self.assertEqual(d.rarity(5, 100), 1.0)  # too few scenes to tell
+
+    def test_counted_weekly(self):
+        app = self.app
+        self.assertEqual(app.rarities(), {})      # not counted yet: every tag weighs 1
+        self.assertEqual(app.count_tags(now=1000), 4)
+        self.assertEqual(self.calls, [[None, "common", "typical", "rare", "gone"]])
+        rare = app.rarities()
+        self.assertEqual(rare["typical"], 1.0)
+        self.assertEqual((rare["gone"], round(rare["common"], 2)), (d.RARITY_MAX, 0.31))
+        self.assertEqual(app.count_tags(now=1000 + d.TAG_COUNT_TTL - 1), 0)
+        app.stash.tag_ids = lambda: ["common", "rare"]
+        self.assertEqual(app.count_tags(now=1000 + d.TAG_COUNT_TTL + 1), 2)
+        self.assertEqual(set(app.rarities()), {"common", "rare"})  # a tag that's gone, too
+
+    def test_weigh_tags(self):
+        rare = {"common": 0.5, "rare": 3.0}
+        feel = {"common": 2, "rare": 1, "meh": -1}
+        # loved and here too 10 * 0.5, liked 2 * 3; neutral (not known) 1; disliked -5 as it is
+        self.assertEqual(d.weigh_tags(["common", "rare", "x", "meh"], feel, {"common", "x"}, rare),
+                         (11.0, 1.0, 5, False))
 
 
 class Images(unittest.TestCase):

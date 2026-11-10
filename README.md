@@ -39,6 +39,11 @@ or available.
   | Dislike | -5 | -5 |
   | Hate | never recommended | |
 
+  Those points are scaled by how rare the tag is, so common tags don't drown the specific
+  ones: a tag on 30,000 of StashDB's scenes counts as above, Blowjob (on a third of them) about
+  a third, one on a few hundred more than double, up to three times. A disliked tag takes off 5
+  however common it is. Each tag's scenes are counted once a week, in the background.
+
   A scene with a disliked tag is never in the first reel, and in Discover only if the tags
   you love and like outweigh its disliked ones.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
@@ -110,7 +115,8 @@ On a phone, open it and "Add to home screen" for an app icon.
   to pick one right there (its magnifier opens the tag's scenes), or use the tag's page.
   StashDB has none, so Desireerr keeps them, per user. They weigh in the reels under a scene
   (above) and in Discover's "New with tags you love or like": of the newest 100 scenes with
-  any of them, those they weigh most in first (loved 4, liked 2, disliked -5; hated never).
+  any of them, those they weigh most in first (loved 4, liked 2, both by rarity; disliked -5; hated
+  never).
   The tags you love or like are your favourite tags: a filter, "With any of the tags I love
   or like" on Scenes (and saved searches, which use them as they are at each check), and the
   top of the Tags page. Wherever tags are listed, they show how you feel about them.

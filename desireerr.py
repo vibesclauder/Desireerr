@@ -21,6 +21,7 @@ import hashlib
 import itertools
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -83,6 +84,12 @@ SIMILAR_TTL = 3600
 DISCOVER_ROW = 20            # scenes in a Discover row
 DISCOVER_TTL = 3600          # Discover's StashDB rows are kept this long (Reload: anew)
 DISCOVER_POOL = 100          # "New with tags you love or like" picks from this many newest
+# A tag's rarity scales the points it adds (see rarity): one on this many of StashDB's scenes
+# counts as it is, a common one less (Blowjob, on a third of them, about a third), a rare one
+# more, within these bounds. Each tag's scenes are counted every TAG_COUNT_TTL.
+RARITY_TYPICAL = 30000
+RARITY_MIN, RARITY_MAX = 0.25, 3.0
+TAG_COUNT_TTL = 7 * 86400
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -254,6 +261,11 @@ CREATE TABLE IF NOT EXISTS tag_feelings (   -- StashDB has no tag favourites: ou
     feeling INTEGER NOT NULL,                -- FEELINGS: 2 love, 1 like, -1 dislike, -2 hate
     created INTEGER NOT NULL,
     PRIMARY KEY (user_id, tag_id)
+);
+CREATE TABLE IF NOT EXISTS tag_scenes (     -- how many StashDB scenes have each tag
+    tag_id TEXT PRIMARY KEY,                 -- '': all of StashDB's scenes
+    scenes INTEGER NOT NULL,
+    checked INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS watch_scenes (
     watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
@@ -449,6 +461,31 @@ query ($input: SceneQueryInput!) {
         data = self.query(SCENE_CARD + f"\nquery ({args}) {{\n{body}\n}}",
                           {f"i{n}": inp for n, inp in enumerate(inputs)}, ttl)
         return [data[f"a{n}"]["scenes"] for n in range(len(inputs))]
+
+    def scene_counts(self, tag_ids, ttl=0):
+        """How many scenes have each tag ({tag ID: count}); with None, all of them ({None: count})."""
+        found = {}
+        for start in range(0, len(tag_ids), 50):
+            chunk = tag_ids[start:start + 50]
+            args = ", ".join(f"$i{n}: SceneQueryInput!" for n in range(len(chunk)))
+            body = "\n".join(f"a{n}: queryScenes(input: $i{n}) {{ count }}" for n in range(len(chunk)))
+            inputs = {f"i{n}": dict({"page": 1, "per_page": 1}, **(
+                {"tags": {"value": [t], "modifier": "INCLUDES"}} if t else {}))
+                for n, t in enumerate(chunk)}
+            data = self.query(f"query ({args}) {{\n{body}\n}}", inputs, ttl)
+            found.update((t, data[f"a{n}"]["count"]) for n, t in enumerate(chunk))
+        return found
+
+    def tag_ids(self):
+        """Every tag's ID."""
+        ids, page = [], 1
+        while True:
+            q = "query ($input: TagQueryInput!) { queryTags(input: $input) { count tags { id } } }"
+            got = self.query(q, {"input": {"page": page, "per_page": 100, "sort": "NAME"}}, 0)["queryTags"]
+            ids += [t["id"] for t in got["tags"]]
+            if not got["tags"] or len(ids) >= got["count"]:
+                return ids
+            page += 1
 
     def find_scene(self, scene_id):
         q = SCENE_FULL + "\nquery ($id: ID!) { findScene(id: $id) { ...SceneFull } }"
@@ -1181,17 +1218,30 @@ def clamp_int(value, default, lo, hi):
         return default
 
 
-def weigh_tags(tags, feel, mine=frozenset()):
+def rarity(scenes, total):
+    """How much a tag on SCENES of StashDB's TOTAL scenes weighs: 1 for one on RARITY_TYPICAL
+    of them, by the log of how rare it is, within RARITY_MIN and RARITY_MAX."""
+    if total <= RARITY_TYPICAL:
+        return 1.0
+    factor = math.log(total / max(scenes, 1)) / math.log(total / RARITY_TYPICAL)
+    return min(RARITY_MAX, max(RARITY_MIN, factor))
+
+
+def weigh_tags(tags, feel, mine=frozenset(), rare=None):
     """What a scene's TAGS add by the user's feelings for them (FEEL: tag ID -> feeling), as
-    FEELING_SCORE has it, MINE being the tags of the scene it's compared with: (what its loved
-    and liked tags add, what its neutral ones add, what its disliked ones take off, whether it
-    has a hated one)."""
+    FEELING_SCORE has it, MINE being the tags of the scene it's compared with, the loved, liked
+    and neutral ones by their rarity (RARE: tag ID -> rarity, 1 if not there; a disliked one
+    weighs the same however common): (what its loved and liked tags add, what its neutral ones
+    add, what its disliked ones take off, whether it has a hated one)."""
+    rare = rare or {}
     liked = neutral = disliked = 0
     for t in set(tags):
         f = feel.get(t, 0)
         if f == FEELINGS["hate"]:
             return 0, 0, 0, True
         points = FEELING_SCORE[f][t in mine]
+        if f >= 0:
+            points *= rare.get(t, 1.0)
         if f > 0:
             liked += points
         elif f < 0:
@@ -1226,6 +1276,7 @@ class App:
         self.nfo_missing = {}    # scene id -> when StashDB didn't have it
         self.discover_cache = {}  # user id -> (when made, {row key: row}), see discover
         self.discover_lock = threading.Lock()
+        self.rare = None         # tag id -> rarity, from tag_scenes (see count_tags)
         self.nfo_error = ""
         self.failures = {}       # ip -> (count, last time), for login throttling
         self.setup_code = self.load_setup_code() if setup_code else ""
@@ -1650,6 +1701,33 @@ class App:
         self.forget_discover(user)
         return self.tag_feelings(user)
 
+    def rarities(self):
+        """Each tag's rarity (tag ID -> rarity), as counted by count_tags; until then none."""
+        if self.rare is None:
+            rows = self.db.all("SELECT tag_id, scenes FROM tag_scenes")
+            counts = {r["tag_id"]: r["scenes"] for r in rows}
+            total = counts.pop("", 0)
+            self.rare = {t: rarity(n, total) for t, n in counts.items()} if total else {}
+        return self.rare
+
+    def count_tags(self, now=None):
+        """Count how many StashDB scenes have each tag, all of them anew every TAG_COUNT_TTL
+        (a tag made since weighs 1 until then). Returns how many were counted."""
+        now = int(now or time.time())
+        last = self.db.one("SELECT checked FROM tag_scenes WHERE tag_id = ''")
+        if last and last["checked"] > now - TAG_COUNT_TTL:
+            return 0
+        ids = self.stash.tag_ids()
+        counts = self.stash.scene_counts([None] + ids)
+        with self.db.lock, self.db.conn:
+            self.db.conn.execute("BEGIN")
+            self.db.conn.execute("DELETE FROM tag_scenes")
+            self.db.conn.executemany(
+                "INSERT INTO tag_scenes (tag_id, scenes, checked) VALUES (?, ?, ?)",
+                [(t or "", counts[t], now) for t in [None] + ids])
+        self.rare = None
+        return len(ids)
+
     def scene_tags(self, ids):
         found = self.stash.find_many("findScene", ids, "{ id tags { id } }")
         return {s["id"]: [t["id"] for t in s["tags"]] for s in found}
@@ -1762,7 +1840,8 @@ class App:
             tags = self.scene_tags([sc["id"] for sc in scenes])
         except ApiError:
             return scenes
-        weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel) for sc in scenes}
+        rare = self.rarities()
+        weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare) for sc in scenes}
         kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
         if rank:  # sorted is stable: the newest first among equals
             kept.sort(key=lambda sc: weights[sc["id"]][2] - weights[sc["id"]][0])
@@ -1791,17 +1870,18 @@ class App:
         """The reels under a scene.
 
         With favourite performers: scenes with any of them (StashDB favourites and those
-        Whisparr follows): SIMILAR_FAV_HERE for each who's in this scene too,
+        the user follows): SIMILAR_FAV_HERE for each who's in this scene too,
         SIMILAR_FAV_PERFORMER for the others, plus the tag score. Discover: scenes with none
         of them (so never the same scene twice): SIMILAR_PERFORMER for each of this scene's
         performers, plus the tag score: what the other scene's tags add by the user's
         feeling for them, FEELING_SCORE (a loved one 4, 10 if this scene has it too; liked 2
-        or 5; neutral 0 or 1; disliked -5). A scene with a hated tag is never recommended;
+        or 5; neutral 0 or 1; disliked -5), times the tag's rarity unless disliked (so the
+        common ones don't drown the rest). A scene with a hated tag is never recommended;
         one with a disliked tag never with the favourite performers, and in Discover only if
         its loved and liked tags outweigh its disliked ones. Both look among StashDB's most
         popular scenes with this one's tags (its ACTION and SCENE tags, loved, then liked
-        ones first, never disliked or hated ones; all of the first three, fewer if that
-        finds too little), and among those of the performers that count.
+        ones first, the rarest first among them, never disliked or hated ones; all of the first
+        three, fewer if that finds too little), and among those of the performers that count.
         Together again: other scenes with two or more of this cast, the most of them first,
         then the newest; they're left out of the other two. Popularity breaks ties.
         """
@@ -1813,7 +1893,8 @@ class App:
         feel = self.feelings(user)
         action = [t["id"] for t in tags if (t.get("category") or {}).get("group") in ("ACTION", "SCENE")]
         action = [t for t in action or [t["id"] for t in tags] if feel.get(t, 0) >= 0]
-        action.sort(key=lambda t: -feel.get(t, 0))
+        rare = self.rarities()
+        action.sort(key=lambda t: (-feel.get(t, 0), -rare.get(t, 1.0)))
         cast = list(dict.fromkeys(p["performer"]["id"] for p in scene.get("performers") or []))
         favs = self.favourite_performers(user)
 
@@ -1889,7 +1970,7 @@ class App:
         except ApiError:
             their_tags = {}
 
-        weights = {sid: weigh_tags(their_tags.get(sid, ()), feel, mine) for sid in {**inner, **outer}}
+        weights = {sid: weigh_tags(their_tags.get(sid, ()), feel, mine, rare) for sid in {**inner, **outer}}
 
         def tag_score(sc):
             liked, neutral, disliked, _ = weights[sc["id"]]
@@ -2832,6 +2913,20 @@ def refresher(app):
         time.sleep(INDEX_MAX_AGE)
 
 
+def tag_counter(app):
+    """Count each tag's scenes (see App.count_tags), checked hourly."""
+    while True:
+        try:
+            counted = app.count_tags()
+            if counted:
+                print(f"counted the scenes of {counted} tags", file=sys.stderr, flush=True)
+        except ApiError as e:
+            print(f"tag counts: {e.message}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"tag counts failed: {e!r}", file=sys.stderr, flush=True)
+        time.sleep(3600)
+
+
 def init(app, user="", password="", stashdb_key="", jellyfin_key=""):
     """Set up the admin, the StashDB key and a Jellyfin API key from outside, e.g. from
     torrent-box's setup.
@@ -2940,6 +3035,7 @@ def main(argv=None):
     app = App(args.data, args.cache)
     if not args.no_refresh:
         threading.Thread(target=refresher, args=(app,), daemon=True).start()
+        threading.Thread(target=tag_counter, args=(app,), daemon=True).start()
     cls = DualStackServer if ":" in args.bind else Server
     server = cls((args.bind, args.port), Handler, app)
     print(f"Desireerr {VERSION} on port {args.port}", flush=True)
