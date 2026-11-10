@@ -18,7 +18,7 @@ or available.
   favourites) can request its new scenes every hour. Following a performer or studio is one
   too, so every request is made, and shown, in Desireerr.
 - **Discover.** Trending, new and popular scenes, new ones with your favourite performers and
-  with the tags you love or like, and what was added lately. StashDB's rows are kept for an
+  with the tags you love or like, performers you might like (below), and what was added lately. StashDB's rows are kept for an
   hour (sooner if your feelings, favourites or follows change); Reload asks again now.
 - **Scene pages.** The cast with their ages then and now (and a † for those who died), and
   reels at the bottom:
@@ -46,6 +46,18 @@ or available.
 
   A scene with a disliked tag is never in the first reel, and in Discover only if the tags
   you love and like outweigh its disliked ones.
+- **Similar performers.** StashDB has no such search, and ignores most of its looks filters,
+  so Desireerr scores them itself: out of 100, how alike two performers are by country (25),
+  when they started (20), hair (15; black and brunette are close), birth year (10), ethnicity
+  (10), height (8), breasts natural or not (5), cup (4) and eyes (3), counting only what both
+  profiles have. It looks among the 300 most popular of the same country (else ethnicity) and
+  200 of their co-stars (who get 5 more). The best 30 also get your taste for their 12 newest
+  scenes, on average.
+  - A performer's page shows the ones most like them: looks, country and era first, your
+    taste only nudging (times 0.3). Abbie Cat gets the Hungarian brunettes of the late 2000s.
+  - Discover's *Performers you might like*: like the ones you loved lately (ten of them), taste
+    counting more (times 3), three at most like any one of them, none you have a feeling for or
+    follow already.
 - **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.

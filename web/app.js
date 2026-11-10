@@ -560,7 +560,10 @@ function personCard(p) {
     <div class="thumb">${im ? html`<img src="${imgUrl(im, 400)}" alt="" loading="lazy" decoding="async">` : noImg("users")}</div>
     ${feelingIcon(performerFeeling(p.id)) ? html`<span class="fav feel-${performerFeeling(p.id)}" title="You ${performerFeeling(p.id)} them">${icon(feelingIcon(performerFeeling(p.id)))}</span>`
       : p.followed ? html`<span class="fav" title="Followed">${icon("bell")}</span>` : ""}
-    <div class="name">${p.name}${p.disambiguation ? html`<small>${p.disambiguation}</small>` : p.scene_count ? html`<small>${p.scene_count} scenes</small>` : ""}</div>
+    ${p.similarity != null ? html`<div class="scores">
+      <span class="points similar" title="How alike: looks, country and era">${icon("similar")}${p.similarity}</span>
+      ${p.taste != null ? html`<span class="points" title="Your taste for their newest scenes, on average">${icon("sparkle")}${p.taste}</span>` : ""}</div>` : ""}
+    <div class="name">${p.name}${p.like ? html`<small>Like ${p.like}</small>` : p.disambiguation ? html`<small>${p.disambiguation}</small>` : p.scene_count ? html`<small>${p.scene_count} scenes</small>` : ""}</div>
   </a>`;
 }
 
@@ -1169,6 +1172,9 @@ async function viewDiscover(view, ctx, fresh = false) {
   sceneRow("trending");
   sceneRow("favorites");
   sceneRow("favtags");
+  const might = rows.performers;
+  if (might?.error) parts.push(html`<section class="section"><div class="section-head"><h2>${might.title}</h2></div>${errorBox(new Error(might.error))}</section>`);
+  else if (might?.performers?.length) parts.push(slider(might.title, might.performers, "people", null, personCard));
   if (d.followed?.performers?.length) parts.push(slider("Performers you follow", d.followed.performers.map((p) => ({ ...p, followed: true })), "people", null, personCard));
   sceneRow("added");
   sceneRow("new");
@@ -1270,6 +1276,17 @@ async function viewScene(view, id, ctx) {
 // The reels under a scene (with favourite performers, Discover, Together again; see
 // App.similar). Loaded
 // after the page, which is complete without them.
+// Under a performer: the ones most like them by looks, country and era (your taste nudges).
+async function similarPerformers(el, id, ctx) {
+  let r;
+  try { r = await api(`performer/${id}/similar`); } catch { return; }
+  if (!ctx.alive() || !r.performers.length) return;
+  el.outerHTML = html`<section class="section">
+    <div class="section-head"><h2>Similar performers</h2><span class="sub">By looks, country and era, then your taste</span></div>
+    <div class="slider people">${r.performers.map(personCard)}</div>
+  </section>`.s;
+}
+
 async function similarScenes(el, id, ctx) {
   let r;
   try { r = await api(`scene/${id}/similar`); } catch { return; }
@@ -1348,12 +1365,14 @@ async function viewPerformer(view, id, ctx) {
       <div class="section-head"><h2>Photos</h2><span class="note">${photos.length}</span></div>
       <div class="slider gallery">${photos.map((ph, i) => html`<button type="button" class="card thumb-btn" data-photo="${i}" aria-label="Photo ${i + 1} of ${photos.length}"><div class="thumb"><img src="${imgUrl(ph.url, 360)}" alt="" loading="lazy" decoding="async"></div></button>`)}</div>
     </section>` : ""}
+    <div id="similar-performers"></div>
     <div class="detail-grid">
       <div class="section"><div class="section-head"><h2>Scenes</h2></div><div class="section" id="browser"></div></div>
       ${facts.length ? html`<aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>` : ""}
     </div>
   </div>`.s;
   $(".page", view).addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(photos, +b.dataset.photo, p.name); });
+  similarPerformers($("#similar-performers", view), id, ctx);
   await sceneBrowser($("#browser", view), ctx, { fixed: { performers: [id] }, fixedNames: { performers: [{ id, name: p.name }] }, defaults: { sort: me.performer_sort === "DATE" ? "DATE" : "TASTE", dir: "desc" } });
 }
 

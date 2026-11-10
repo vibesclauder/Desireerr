@@ -100,6 +100,26 @@ PERFORMER_POINTS = PERFORMER_SCORE[1]
 AFFINITY_HALF_LIFE = 365 * 86400
 MULTI_SCENE_TAGS = {"3da5244d-b0f9-48af-b5e1-d46ecedb4308",   # Compilation
                     "d9ea7d4e-57ea-4315-9f21-57e98bf42457"}   # Multiple Scenes
+# Similar performers (see App.similar_performers): how alike two profiles are, out of 100, by
+# these weights (only what both have counts; a sparse profile loses some). A co-star of the
+# performer gets COSTAR_BONUS more. The best LOOKALIKE_TASTED get their newest TASTE_SCENES
+# scored by the user's taste too, which adds its average times the weight: a little on a
+# performer's page, more on Discover's "Performers you might like".
+LOOKALIKE = {"country": 25, "era": 20, "hair": 15, "age": 10, "ethnicity": 10, "height": 8,
+             "breasts": 5, "cup": 4, "eyes": 3}
+HAIR_FAMILY = {"BLACK": "dark", "BRUNETTE": "dark", "AUBURN": "red", "RED": "red"}
+CUPS = {"AA": 0, "A": 1, "B": 2, "C": 3, "D": 4, "DD": 5, "E": 5, "DDD": 6, "F": 6, "FF": 7, "G": 7,
+        "GG": 8, "H": 8, "HH": 9, "I": 9, "J": 10, "K": 11}
+COSTAR_BONUS = 5
+LOOKALIKE_PAGES = 3          # pages of 100 of the same country's (or ethnicity's) most popular
+COSTAR_PAGES = 2             # pages of 100 of their co-stars
+LOOKALIKE_TASTED = 30
+TASTE_SCENES = 12
+SIMILAR_PERFORMERS = 24
+SIMILAR_TASTE_WEIGHT = 0.3   # on a performer's page: looks and era first
+MIGHT_LIKE_TASTE_WEIGHT = 3.0  # an average taste is small (a few points a scene): this makes it count
+MIGHT_LIKE_SEEDS = 10        # the performers loved most lately
+MIGHT_LIKE_EACH = 3          # suggestions like any one of them, at most
 TASTE_POOL = 500             # sorted by taste: this many of the newest matching scenes
 TASTE_TTL = 600
 
@@ -409,6 +429,13 @@ fragment StudioCard on Studio {
   parent { id name }
 }"""
 
+PERFORMER_PROFILE = """
+fragment PerformerProfile on Performer {
+  id name disambiguation gender scene_count
+  images { url width height }
+  country ethnicity hair_color eye_color height cup_size breast_type career_start_year birth_date
+}"""
+
 TAG_CARD = """
 fragment TagCard on Tag {
   id name description aliases
@@ -558,6 +585,17 @@ query ($input: PerformerQueryInput!) {
   queryPerformers(input: $input) { count performers { ...PerformerCard } }
 }"""
         return self.query(q, {"input": perf_input})["queryPerformers"]
+
+    def performer_profiles(self, perf_input, ttl=3600):
+        q = PERFORMER_PROFILE + """
+query ($input: PerformerQueryInput!) {
+  queryPerformers(input: $input) { count performers { ...PerformerProfile } }
+}"""
+        return self.query(q, {"input": perf_input}, ttl)["queryPerformers"]["performers"]
+
+    def performer_profile(self, pid, ttl=3600):
+        found = self.find_many("findPerformer", [pid], "{ ...PerformerProfile }", PERFORMER_PROFILE, ttl)
+        return found[0] if found else None
 
     # studios
     def find_studio(self, sid):
@@ -1300,6 +1338,43 @@ def performer_points(people, tags, perf):
     return max([v for v in values if v > 0], default=0) + min([v for v in values if v < 0], default=0)
 
 
+def lookalike(a, b):
+    """How alike performers A and B look and when they worked, 0 to 100 (see LOOKALIKE)."""
+    def year(p, key):
+        v = p.get(key)
+        return int(str(v)[:4]) if v and str(v)[:4].isdigit() else None
+
+    def near(x, y, span):
+        return None if x is None or y is None else max(0.0, 1 - abs(x - y) / span)
+
+    def same(x, y):
+        return None if not x or not y else float(x == y)
+
+    def hair(x, y):
+        if not x or not y or "VARIOUS" in (x, y) or "OTHER" in (x, y):
+            return None
+        if x == y:
+            return 1.0
+        fam = {HAIR_FAMILY.get(x), HAIR_FAMILY.get(y)}
+        return 0.7 if len(fam) == 1 and None not in fam else 0.4 if fam == {"dark", "red"} else 0.0
+    parts = {
+        "country": same(a.get("country"), b.get("country")),
+        "era": near(year(a, "career_start_year"), year(b, "career_start_year"), 6),
+        "hair": hair(a.get("hair_color"), b.get("hair_color")),
+        "age": near(year(a, "birth_date"), year(b, "birth_date"), 6),
+        "ethnicity": same(a.get("ethnicity"), b.get("ethnicity")),
+        "height": near(a.get("height"), b.get("height"), 12),
+        "breasts": same(a.get("breast_type"), b.get("breast_type")),
+        "cup": near(CUPS.get((a.get("cup_size") or "").upper()), CUPS.get((b.get("cup_size") or "").upper()), 3),
+        "eyes": same(a.get("eye_color"), b.get("eye_color")),
+    }
+    known = sum(LOOKALIKE[k] for k, v in parts.items() if v is not None)
+    if known < 40:
+        return 0.0
+    matched = sum(LOOKALIKE[k] * v for k, v in parts.items() if v is not None)
+    return 100 * matched / known * (0.6 + 0.4 * known / sum(LOOKALIKE.values()))
+
+
 def card_people(sc):
     return [p["performer"]["id"] for p in sc.get("performers") or [] if p.get("performer")]
 
@@ -1845,6 +1920,7 @@ class App:
              None),
             ("favtags", "New with tags you love or like", lambda: self.new_with_loved_tags(user, ttl),
              "/scenes?fav_tags=1"),
+            ("performers", "Performers you might like", lambda: self.might_like(user, ttl), None),
             ("added", "Recently added", self.recent_library, None),
             ("new", "New releases", lambda: self.stash.query_scenes(
                 {"page": 1, "per_page": DISCOVER_ROW, "sort": "DATE", "direction": "DESC",
@@ -1878,7 +1954,8 @@ class App:
         with self.discover_lock:
             self.discover_cache[user["id"]] = (made, {**kept, **keep})
         rows.update(kept)
-        out = [dict(rows[key], scenes=self.annotate(rows[key]["scenes"], user))
+        out = [dict(rows[key], scenes=self.annotate(rows[key]["scenes"], user)) if key != "performers"
+               else dict(rows[key], performers=rows[key]["scenes"], scenes=[])
                for key, *_ in specs]
         mine = self.db.all("SELECT * FROM requests WHERE user_id = ? ORDER BY id DESC LIMIT 12",
                            (user["id"],))
@@ -2112,6 +2189,131 @@ class App:
                 ("together", "Together again", "Two or more of this cast in another scene", again)]
         return {"rows": [{"key": key, "title": title, "sub": sub, "scenes": self.annotate(scenes, user)}
                          for key, title, sub, scenes in rows if scenes]}
+
+    # -- similar performers -------------------------------------------------------------
+    def lookalikes(self, seed, ttl=3600):
+        """Performers like SEED (a PerformerProfile): {ID: (lookalike score, with COSTAR_BONUS
+        for a co-star, their profile)}, from the same gender's most popular of their country
+        (else ethnicity) and their co-stars."""
+        base = {"sort": "POPULARITY", "direction": "DESC", "per_page": 100}
+        if seed.get("gender"):
+            base["gender"] = seed["gender"]
+        if seed.get("country"):
+            near = {"country": {"value": seed["country"], "modifier": "EQUALS"}}
+        elif seed.get("ethnicity"):
+            near = {"ethnicity": seed["ethnicity"]}
+        else:
+            near = None
+        inputs = [dict(base, page=n, **near) for n in range(1, LOOKALIKE_PAGES + 1)] if near else []
+        costar = [dict(base, page=n, performed_with=seed["id"]) for n in range(1, COSTAR_PAGES + 1)]
+
+        def ask(inp):
+            try:
+                return self.stash.performer_profiles(inp, ttl)
+            except ApiError as e:
+                print(f"similar performers to {seed['id']}: {e.message}", file=sys.stderr, flush=True)
+                return []
+        with ThreadPoolExecutor(len(inputs) + len(costar)) as pool:
+            answers = list(pool.map(ask, inputs + costar))
+        costars = {p["id"] for got in answers[len(inputs):] for p in got}
+        found = {}
+        for got in answers:
+            for p in got:
+                if p["id"] != seed["id"] and p["id"] not in found:
+                    found[p["id"]] = (lookalike(seed, p) + (COSTAR_BONUS if p["id"] in costars else 0), p)
+        return found
+
+    def performer_tastes(self, ids, user, ttl=3600):
+        """Performer ID -> the user's average taste for their newest TASTE_SCENES scenes (a
+        hated one -10); none without feelings, or without scenes."""
+        feel, perf = self.feelings(user), self.performer_taste(user)
+        if not ids or not (feel or perf):
+            return {}
+        rare, ids = self.rarities(), list(ids)
+        chunks = [ids[i:i + 15] for i in range(0, len(ids), 15)]
+
+        def ask(chunk):
+            try:
+                return self.stash.query_scenes_many(
+                    [{"page": 1, "per_page": TASTE_SCENES, "sort": "DATE", "direction": "DESC",
+                      "performers": {"value": [pid], "modifier": "INCLUDES"},
+                      "date": {"value": tomorrow(), "modifier": "LESS_THAN"}} for pid in chunk], ttl)
+            except ApiError as e:
+                print(f"performers' scenes: {e.message}", file=sys.stderr, flush=True)
+                return [[] for _ in chunk]
+        with ThreadPoolExecutor(len(chunks)) as pool:
+            answers = [scenes for got in pool.map(ask, chunks) for scenes in got]
+        out = {}
+        for pid, scenes in zip(ids, answers):
+            if scenes:
+                tags = self.card_tags(scenes)
+                values = [taste(weigh_tags(tags.get(sc["id"], ()), feel, rare=rare),
+                                performer_points(card_people(sc), tags.get(sc["id"], ()), perf))
+                          for sc in scenes]
+                out[pid] = sum(-10 if v is None else v for v in values) / len(values)
+        return out
+
+    def ranked_performers(self, scored, user, weight, size, ttl=3600, tasted=LOOKALIKE_TASTED, each=None):
+        """The best SIZE of SCORED ({ID: (score, profile, extra)}), the best TASTED of them also
+        by the user's taste times WEIGHT (with EACH, at most that many with the same "like"):
+        cards with "similarity" and "taste"."""
+        best = sorted(scored, key=lambda pid: -scored[pid][0])[:tasted]
+        tastes = self.performer_tastes(best, user, ttl)
+        best.sort(key=lambda pid: -(scored[pid][0] + weight * tastes.get(pid, 0)))
+        if each:
+            count, kept = {}, []
+            for pid in best:
+                seed = scored[pid][2].get("like")
+                if count.get(seed, 0) < each:
+                    count[seed] = count.get(seed, 0) + 1
+                    kept.append(pid)
+            best = kept
+        out = []
+        for pid in best[:size]:
+            score, prof, extra = scored[pid]
+            card = {k: prof.get(k) for k in ("id", "name", "disambiguation", "gender", "scene_count", "images")}
+            card.update(extra, similarity=round(score))
+            if pid in tastes:
+                card["taste"] = round(tastes[pid])
+            out.append(card)
+        return out
+
+    def similar_performers(self, pid, user):
+        """Performers like this one: by looks, country and era (lookalikes), the user's taste
+        only nudging (SIMILAR_TASTE_WEIGHT); none they dislike or hate."""
+        seed = self.stash.performer_profile(pid)
+        if not seed:
+            raise ApiError(404, "StashDB has no performer with that ID.")
+        feel = self.performer_feelings(user)
+        scored = {p: (score, prof, {}) for p, (score, prof) in self.lookalikes(seed).items()
+                  if feel.get(p, 0) >= 0}
+        return {"performers": self.ranked_performers(scored, user, SIMILAR_TASTE_WEIGHT, SIMILAR_PERFORMERS)}
+
+    def might_like(self, user, ttl=3600):
+        """Discover's performers: like the ones the user loved lately (MIGHT_LIKE_SEEDS; else
+        liked), by looks, country and era and their taste for their scenes
+        (MIGHT_LIKE_TASTE_WEIGHT); none they have a feeling for or follow already."""
+        rows = self.db.all("SELECT performer_id, name, feeling FROM performer_feelings WHERE user_id = ? "
+                           "AND feeling > 0 ORDER BY feeling DESC, created DESC LIMIT ?",
+                           (user["id"], MIGHT_LIKE_SEEDS))
+        if not rows:
+            return []
+        known = set(self.performer_feelings(user)) | {f["id"] for f in self.follows(user, "performer")}
+        timing = Timing.current()
+
+        def around(row):
+            Timing.begin(timing)
+            seed = self.stash.performer_profile(row["performer_id"], ttl or 3600)
+            return (row["name"], self.lookalikes(seed, ttl or 3600)) if seed else (row["name"], {})
+        with ThreadPoolExecutor(len(rows)) as pool:
+            found = list(pool.map(around, rows))
+        scored = {}
+        for name, alike in found:
+            for pid, (score, prof) in alike.items():
+                if pid not in known and score > scored.get(pid, (-1,))[0]:
+                    scored[pid] = (score, prof, {"like": name})
+        return self.ranked_performers(scored, user, MIGHT_LIKE_TASTE_WEIGHT, DISCOVER_ROW, ttl or 3600,
+                                      tasted=LOOKALIKE_TASTED * 2, each=MIGHT_LIKE_EACH)
 
     def favourite_performers(self, user=None):
         """The inner circle: the performers the user loves, likes or follows, but not the ones
@@ -2935,6 +3137,8 @@ class Handler(BaseHTTPRequestHandler):
             return 200, app.search(q.get("q"), user), None
         if key == ("GET", "performers"):
             return 200, app.browse_performers(q), None
+        if key == ("GET", "performer") and len(parts) == 3 and parts[2] == "similar":
+            return 200, app.similar_performers(parts[1], user), None
         if key == ("GET", "performer") and len(parts) == 2:
             return 200, app.performer(parts[1], user), None
         if key == ("GET", "studios"):

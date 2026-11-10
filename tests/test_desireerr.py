@@ -612,7 +612,7 @@ class Similar(unittest.TestCase):
         self.assertEqual(len(self.queries), asked)                         # StashDB not asked
         self.assertEqual(again["rows"], first["rows"])
         self.assertEqual(again["updated"], first["updated"])
-        self.assertEqual([r["key"] for r in again["rows"]], ["trending", "favorites", "favtags", "added", "new", "popular"])
+        self.assertEqual([r["key"] for r in again["rows"]], ["trending", "favorites", "favtags", "performers", "added", "new", "popular"])
         self.app.discover({"id": 2})                                       # per user
         self.assertGreater(len(self.queries), asked)
         asked = len(self.queries)
@@ -1473,6 +1473,76 @@ class Taste(Base):
         self.assertEqual(post({"performer_sort": "DATE"}), 200)
         self.assertEqual(self.app.session_user(token)["performer_sort"], "DATE")
         self.assertEqual(post({"performer_sort": "TITLE"}), 400)
+
+
+def profile(pid, **kw):
+    return dict({"id": pid, "name": pid, "gender": "FEMALE", "images": [], "scene_count": 10}, **kw)
+
+
+class SimilarPerformers(Base):
+    ABBIE = dict(country="HU", hair_color="BLACK", career_start_year=2008, birth_date="1989-05-19",
+                 ethnicity="CAUCASIAN", height=170, cup_size="D", breast_type="FAKE", eye_color="BROWN")
+
+    def setUp(self):
+        super().setUp()
+        self.profiles = {
+            "abbie": profile("abbie", **self.ABBIE),
+            "twin": profile("twin", **dict(self.ABBIE, hair_color="BRUNETTE", career_start_year=2009)),
+            "later": profile("later", **dict(self.ABBIE, career_start_year=2020, birth_date="2001-01-01")),
+            "blonde": profile("blonde", **dict(self.ABBIE, hair_color="BLONDE", career_start_year=2010)),
+            "costar": profile("costar", country="CZ", hair_color="BROWN", career_start_year=2008, ethnicity="CAUCASIAN"),
+            "sparse": profile("sparse", country="HU"),
+        }
+        self.asked = []
+
+        def performer_profiles(inp, ttl=3600):
+            self.asked.append(inp)
+            if inp.get("performed_with"):
+                return [self.profiles["costar"]] if inp["page"] == 1 else []
+            return [p for k, p in self.profiles.items() if p.get("country") == "HU"] if inp["page"] == 1 else []
+        self.app.stash.performer_profiles = performer_profiles
+        self.app.stash.performer_profile = lambda pid, ttl=3600: self.profiles.get(pid)
+        self.app.stash.query_scenes_many = lambda inputs, ttl=300: [[] for _ in inputs]
+
+    def test_lookalike(self):
+        abbie, P = self.profiles["abbie"], self.profiles
+        score = {k: d.lookalike(abbie, p) for k, p in P.items()}
+        self.assertAlmostEqual(score["abbie"], 100)
+        self.assertGreater(score["twin"], 90)                          # black ~ brunette, a year apart
+        self.assertGreater(score["twin"], score["blonde"])
+        self.assertGreater(score["blonde"], score["later"])            # the era counts more than hair
+        self.assertEqual(score["sparse"], 0)                           # too little to tell
+
+    def test_on_a_performers_page(self):
+        got = self.app.similar_performers("abbie", self.user)["performers"]
+        self.assertEqual([p["id"] for p in got[:3]], ["twin", "blonde", "later"])
+        self.assertNotIn("abbie", [p["id"] for p in got])
+        self.assertIn("costar", [p["id"] for p in got])
+        q = [a for a in self.asked if not a.get("performed_with")][0]
+        self.assertEqual((q["country"], q["gender"], q["sort"]), ({"value": "HU", "modifier": "EQUALS"}, "FEMALE", "POPULARITY"))
+        self.app.stash.find_performer = lambda pid: {"id": pid, "name": pid}
+        self.app.set_performer_feeling(self.user, "twin", "hate")
+        self.assertNotIn("twin", [p["id"] for p in self.app.similar_performers("abbie", self.user)["performers"]])
+
+    def test_taste_nudges(self):
+        self.app.performer_tastes = lambda ids, user, ttl=3600: {"later": 200}
+        got = self.app.similar_performers("abbie", self.user)["performers"]
+        self.assertEqual(got[0]["id"], "later")                         # +60 (200 * 0.3)
+        self.assertEqual(got[0]["taste"], 200)
+
+    def test_might_like(self):
+        app = self.app
+        self.assertEqual(app.might_like(self.user), [])                 # loves nobody yet
+        app.stash.find_performer = lambda pid: {"id": pid, "name": pid}
+        app.set_performer_feeling(self.user, "abbie", "love")
+        app.set_performer_feeling(self.user, "blonde", "like")
+        got = app.might_like(self.user)
+        ids = [p["id"] for p in got]
+        self.assertEqual(ids[0], "twin")
+        self.assertNotIn("blonde", ids)                                 # has a feeling already
+        self.assertEqual(got[0]["like"], "abbie")
+        with unittest.mock.patch.object(d, "MIGHT_LIKE_EACH", 1):
+            self.assertEqual([p["like"] for p in app.might_like(self.user)], ["abbie"])  # one each
 
 
 def full_scene(sid=SCENE):
