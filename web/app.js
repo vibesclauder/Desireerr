@@ -506,7 +506,7 @@ function progressBar(st) {
 const noImg = (ic = "film") => html`<div class="noimg">${icon(ic)}</div>`;
 
 // Under a scene's title: its taste points and the tags and performers that make them, most first.
-const WHY = { favourite: "favourite", followed: "followed", requested: "from your requests", less: "less of them" };
+const WHY = { favourite: "favourite", followed: "followed", requested: "from your requests", love: "loved", like: "liked", dislike: "disliked", hate: "hated" };
 function tasteLine(s) {
   if (s.taste === undefined) return "";
   const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
@@ -514,7 +514,7 @@ function tasteLine(s) {
   return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less), and its performers: favourites and followed ones, the ones you request, and the ones you want less of${s.taste_several ? ". It's cut together from several scenes, so only the best and the worst performer count." : ""}">
     ${s.taste === null ? html`<span class="points hated">${icon("ban")}</span>` : html`<span class="points">${icon("sparkle")}${s.taste}</span>`}
     ${parts.map((t) => t.kind === "performer"
-      ? html`<span class="${t.points < 0 ? "feel-dislike" : "feel-like"}">${t.name} ${sign(t.points)} <small>(${WHY[t.why]})</small></span>`
+      ? html`<span class="${t.points === null || t.points < 0 ? "feel-dislike" : "feel-like"}">${t.name} ${t.points === null ? "" : sign(t.points)} <small>(${WHY[t.why]})</small></span>`
       : html`<span class="feel-${t.feeling}">${t.name} ${t.points === null ? "(hated)" : sign(t.points)}</span>`)}
   </div>`;
 }
@@ -666,10 +666,17 @@ document.addEventListener("click", async (e) => {
       await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
       toast(fav ? "Added to your StashDB favourites. Nothing is downloaded for it; use them as a filter." : "Removed from your StashDB favourites.");
       render();
-    } else if (act === "less") {
-      const less = b.dataset.less === "1";
-      await api("performer-less", { method: "POST", body: { id: b.dataset.id, less } });
-      toast(less ? "Their scenes rank lower in your taste (−4 each). Nothing is hidden." : "Their scenes count as before.");
+    } else if (act === "pfeeling") {
+      const f = b.dataset.feeling;
+      await api("performer-feelings", { method: "POST", body: { id: b.dataset.id, feeling: f } });
+      toast({
+        love: "Loved: +8 to your taste for each of their scenes, and one of your favourite performers.",
+        like: "Liked: +4 to your taste for each of their scenes, and one of your favourite performers.",
+        neutral: "Neutral: as a favourite, followed or requested performer, if they're one, else nothing.",
+        dislike: "Disliked: −4 to your taste for each of their scenes. Nothing is hidden.",
+        hate: "Hated: their scenes are never recommended, and rank last by your taste.",
+      }[f]);
+      await refreshStatus();
       render();
     } else if (act === "follow") {
       const follow = b.dataset.follow === "1";
@@ -1244,7 +1251,7 @@ async function viewScene(view, id, ctx) {
         ${s.performers?.length ? html`<section class="section"><div class="section-head"><h2>Performers</h2></div>
           <div class="cast">${s.performers.map((p) => {
             const pim = pickImage(p.performer.images, false);
-            return html`<a href="/performer/${p.performer.id}"><div class="face">${pim ? html`<img src="${imgUrl(pim, 240)}" alt="" loading="lazy">` : ""}</div><span>${performerName(p)}${p.as && p.as !== p.performer.name ? html`<small>${p.performer.name}</small>` : p.performer.disambiguation ? html`<small>${p.performer.disambiguation}</small>` : ""}${castAges(p.performer, s)}</span></a>`;
+            return html`<a href="/performer/${p.performer.id}"><div class="face">${pim ? html`<img src="${imgUrl(pim, 240)}" alt="" loading="lazy">` : ""}</div><span>${performerName(p)}${feelingIcon(performerFeeling(p.performer.id)) ? html` <i class="cast-feel feel-${performerFeeling(p.performer.id)}" title="You ${performerFeeling(p.performer.id)} them">${icon(feelingIcon(performerFeeling(p.performer.id)))}</i>` : ""}${p.as && p.as !== p.performer.name ? html`<small>${p.performer.name}</small>` : p.performer.disambiguation ? html`<small>${p.performer.disambiguation}</small>` : ""}${castAges(p.performer, s)}</span></a>`;
           })}</div></section>` : ""}
         ${s.details ? html`<section class="section"><div class="section-head"><h2>About</h2></div><p class="prose">${s.details}</p></section>` : ""}
         ${s.tags?.length ? html`<section class="section"><div class="section-head"><h2>Tags</h2>${similar.length ? html`<a class="more" href="/scenes${qs({ tags: similar, sort: "POPULARITY" })}">More like this${icon("chevron")}</a>` : ""}</div>
@@ -1278,12 +1285,11 @@ function favoriteButton(kind, item) {
     : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="Add to your StashDB favourites: a filter on Discover, Scenes and the lists. Nothing is downloaded for it.">${icon("heart")}Add to favourites</button>`;
 }
 
-// Fewer of a performer's scenes: they rank lower in your taste, nothing is hidden.
-function lessButton(p) {
-  return p.less
-    ? html`<button class="btn on-bad" data-act="less" data-id="${p.id}" data-less="0" title="Their scenes rank lower in your taste (−4 each). Click to count them as before.">${icon("thumbDown")}Less of them</button>`
-    : html`<button class="btn ghost" data-act="less" data-id="${p.id}" data-less="1" title="Rank their scenes lower in your taste (−4 each), say for someone in everything you don't care for. Nothing is hidden.">${icon("thumbDown")}Less of them</button>`;
+// How you feel about a performer: love 8, like 4, dislike -4 to your taste; hate: never recommended.
+function performerFeelings(p) {
+  return html`<div class="seg feelings" role="group" aria-label="How you feel about this performer">${FEELINGS.map(([k, label, ic]) => html`<button type="button" class="${k === p.feeling ? `on feel-${k}` : ""}" data-act="pfeeling" data-id="${p.id}" data-feeling="${k}" aria-pressed="${k === p.feeling}">${ic ? icon(ic) : ""}${label}</button>`)}</div>`;
 }
+const performerFeeling = (id) => (status.performer_feelings || []).find((x) => x.id === id)?.feeling || "neutral";
 
 function followButton(kind, item) {
   const f = item.follow || {};
@@ -1331,7 +1337,8 @@ async function viewPerformer(view, id, ctx) {
           <h1>${p.name}${p.death_date ? html` <span class="dagger" title="Died ${fmtDate(p.death_date)}">†</span>` : ""}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
-          <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}${lessButton(p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
+          <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
+          <div>${performerFeelings(p)}</div>
         </div>
       </div>
     </section>
@@ -1520,7 +1527,14 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
 const option = (v, label, cur) => html`<option value="${v}" ${v === cur ? "selected" : ""}>${label}</option>`;
 
 async function viewPerformers(view, ctx) {
-  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Performers</h1></div><div class="section" id="list"></div></div>`.s;
+  const mine = status.performer_feelings || [];
+  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Performers</h1></div>
+    ${[["love", "Performers you love"], ["like", "Performers you like"], ["dislike", "Performers you dislike"], ["hate", "Performers you hate"]].map(([k, title]) => {
+      const ps = mine.filter((x) => x.feeling === k);
+      return ps.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>${title}</h2></div>
+        <div class="chips">${ps.map((x) => html`<a class="chip feel-${k}" href="/performer/${x.id}">${icon(feelingIcon(k))}${x.name}</a>`)}</div></section>` : "";
+    })}
+    <div class="section" id="list"></div></div>`.s;
   await listBrowser($("#list", view), ctx, {
     endpoint: "performers", key: "performers", card: personCard, gridClass: "people",
     defaults: { q: "", sort: "POPULARITY", gender: "FEMALE", favorites: "" },

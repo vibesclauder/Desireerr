@@ -532,6 +532,16 @@ class Similar(unittest.TestCase):
         self.assertEqual(self.rows()["discover"], ["y3", "y1"])
         self.assertTrue(self.asked(None, ["B", "A"]))  # among the neutral ones, the rarest first
 
+    def test_performer_feelings(self):
+        self.app.performer_feelings = lambda user, named=False: {"w1": -2, "d1": -1, "l1": 2} if user else {}
+        self.listed = [self.card("x1", "w1"), self.card("x2", "f2"), self.card("x3", "f2", "d1"),
+                       self.card("x4", "l1"), self.card("y1", "w2"), self.card("y2", "w2", "d1"),
+                       self.card("y3", "w2", "w1")]
+        rows = self.rows()
+        # w1 hated (a favourite, here too): never; l1 loved: a favourite now; d1 disliked: -4
+        self.assertEqual(rows["inner"], ["x2", "x4", "x3"])   # 10, 10, 10 - 4
+        self.assertEqual(rows["discover"], ["y1", "y2"])      # 5, 5 - 4
+
     def test_rank_points(self):
         self.listed = [self.card("x1", "w1"), self.card("y1", "w2"), self.card("y2")]
         self.app.stash.tags = {"x1": ["A"], "y1": ["D"]}
@@ -1350,19 +1360,37 @@ class Taste(Base):
         app = self.app
         app.stash.favourites = ["fav"]
         app.stash.find_performer = lambda pid: {"id": pid, "name": pid.upper()}
-        app.set_performer_less(self.user, "aaaaaaaa-less", True)
+        for pid, feeling in (("aaaaaaaa-love", "love"), ("aaaaaaaa-like", "like"),
+                             ("aaaaaaaa-meh", "dislike"), ("aaaaaaaa-no", "hate")):
+            app.set_performer_feeling(self.user, pid, feeling)
         perf = app.performer_taste(self.user)
-        self.assertEqual((perf["fav"], perf["aaaaaaaa-less"]), ((4, "favourite"), (-4, "less")))
+        self.assertEqual([perf[p] for p in ("fav", "aaaaaaaa-love", "aaaaaaaa-like", "aaaaaaaa-meh", "aaaaaaaa-no")],
+                         [(4, "favourite"), (8, "love"), (4, "like"), (-4, "dislike"), (None, "hate")])
         points = lambda *ids, tags=(): d.performer_points(ids, tags, perf)
-        self.assertEqual(points("fav", "aaaaaaaa-less", "x"), 0)
-        perf["fav2"] = (4, "followed")
-        self.assertEqual(points("fav", "fav2"), 8)                                  # together: add up
-        self.assertEqual(points("fav", "fav2", "aaaaaaaa-less", tags=[next(iter(d.MULTI_SCENE_TAGS))]), 0)  # best, worst
-        self.assertTrue(app.performer("aaaaaaaa-less", self.user)["less"])
-        app.set_performer_less(self.user, "aaaaaaaa-less", False)
-        self.assertNotIn("aaaaaaaa-less", app.performer_taste(self.user))
-        app.set_performer_less(self.user, "fav", True)                              # wins over a favourite
-        self.assertEqual(app.performer_taste(self.user)["fav"], (-4, "less"))
+        self.assertEqual(points("fav", "aaaaaaaa-meh", "x"), 0)
+        self.assertEqual(points("fav", "aaaaaaaa-love"), 12)                        # together: add up
+        several = [next(iter(d.MULTI_SCENE_TAGS))]
+        self.assertEqual(points("fav", "aaaaaaaa-love", "aaaaaaaa-meh", tags=several), 4)  # best, worst
+        self.assertIsNone(points("fav", "aaaaaaaa-no"))                             # hated: never
+        self.assertIsNone(d.taste((5, 0, 0, False), points("aaaaaaaa-no")))
+        self.assertEqual(app.performer("aaaaaaaa-meh", self.user)["feeling"], "dislike")
+        self.assertEqual(app.favourite_performers(self.user), {"fav", "aaaaaaaa-love", "aaaaaaaa-like"})
+        app.set_performer_feeling(self.user, "fav", "dislike")                     # wins over a favourite
+        self.assertEqual(app.performer_taste(self.user)["fav"], (-4, "dislike"))
+        self.assertNotIn("fav", app.favourite_performers(self.user))
+        app.set_performer_feeling(self.user, "fav", "neutral")
+        self.assertEqual(app.performer_taste(self.user)["fav"], (4, "favourite"))
+        self.assertEqual([x["feeling"] for x in app.performer_feelings(self.user, named=True)],
+                         ["like", "love", "dislike", "hate"])                      # by name
+
+    def test_hated_performer_never_recommended(self):
+        app = self.app
+        app.stash.find_performer = lambda pid: {"id": pid, "name": pid}
+        app.set_performer_feeling(self.user, "aaaaaaaa-no", "hate")
+        app.stash.listed[0]["performers"] = [{"as": None, "performer": {"id": "aaaaaaaa-no"}}]
+        got = {x["id"]: x for x in app.browse_scenes({}, self.user)["scenes"]}
+        self.assertTrue(got["s1"]["hated"])
+        self.assertNotIn("s1", [x["id"] for x in app.by_feelings(app.stash.listed, self.user)])
 
     def test_learned_from_requests(self):
         app, day = self.app, 86400

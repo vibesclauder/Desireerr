@@ -119,12 +119,15 @@ On a phone, open it and "Add to home screen" for an app icon.
   never).
   Every scene card shows your taste for it (✦): what its tags add, a loved one 4 and a liked
   one 2 (times its rarity, see Scene pages), a disliked one -5, and a ban sign for a hated one;
-  and what its performers add: 4 for a favourite or one you follow, up to that for those whose
-  scenes you request (0.29 of it after one request, 0.65 after three; a request counts half after
-  a year, so those fade), and -4 for one you want **Less of** (the button on their page: for
-  someone in everything you don't care for; nothing is hidden). Performers add up, except in a
-  video cut together from several scenes (StashDB's Compilation or Multiple Scenes tag), where
-  only the best and the worst count. A scene's page lists the tags and performers that make it. Sort by *Your taste* to see the newest 500 scenes
+  and what its performers add, by how you feel about them (on their page, the same five
+  feelings): loved 8, liked 4, disliked -4 (nothing hidden: for someone in everything you don't
+  care for), hated never recommended. Without a feeling, a favourite or one you follow counts as
+  liked, and one whose scenes you request up to that (0.29 of it after one request, 0.65 after
+  three; a request counts half after a year, so those fade). Loved and liked performers are
+  favourites too: in the reel under a scene and Discover's row; disliked and hated ones aren't,
+  even StashDB favourites. Performers add up, except in a video cut together from several scenes
+  (StashDB's Compilation or Multiple Scenes tag), where only the best and the worst count. A
+  scene's page lists the tags and performers that make it; the Performers page, yours. Sort by *Your taste* to see the newest 500 scenes
   that match the filters, best first; a performer's page does that to start with (Settings,
   Your taste: or newest first). In the reels under a scene, a similarity score (two
   circles) sits above it: what they're ranked by.

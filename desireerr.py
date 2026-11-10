@@ -90,12 +90,13 @@ DISCOVER_POOL = 100          # "New with tags you love or like" picks from this 
 RARITY_TYPICAL = 30000
 RARITY_MIN, RARITY_MAX = 0.25, 3.0
 TAG_COUNT_TTL = 7 * 86400
-# Performers in the taste score: a favourite or followed one adds PERFORMER_POINTS (a loved tag's
-# worth), one whose scenes you requested up to that, by how many and how lately (half of it after
-# AFFINITY_HALF_LIFE), one you want less of takes off PERFORMER_DISLIKE. Several add up, unless
-# the video is cut together from several scenes (MULTI_SCENE_TAGS): then only the best and worst.
-PERFORMER_POINTS = 4
-PERFORMER_DISLIKE = 4
+# Performers in the taste score, by the user's feeling for them (FEELINGS, as for tags; a hated
+# one: never recommended). Without one, a favourite or followed performer counts as liked, and one
+# whose scenes they requested up to that, by how many and how lately (half after
+# AFFINITY_HALF_LIFE). Several add up, unless the video is cut together from several scenes
+# (MULTI_SCENE_TAGS): then only the best and the worst.
+PERFORMER_SCORE = {2: 8, 1: 4, -1: -4}
+PERFORMER_POINTS = PERFORMER_SCORE[1]
 AFFINITY_HALF_LIFE = 365 * 86400
 MULTI_SCENE_TAGS = {"3da5244d-b0f9-48af-b5e1-d46ecedb4308",   # Compilation
                     "d9ea7d4e-57ea-4315-9f21-57e98bf42457"}   # Multiple Scenes
@@ -273,7 +274,7 @@ CREATE TABLE IF NOT EXISTS tag_feelings (   -- StashDB has no tag favourites: ou
     created INTEGER NOT NULL,
     PRIMARY KEY (user_id, tag_id)
 );
-CREATE TABLE IF NOT EXISTS performer_feelings (  -- per user: -1, fewer of their scenes
+CREATE TABLE IF NOT EXISTS performer_feelings (  -- per user, as tag_feelings
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     performer_id TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -1282,16 +1283,18 @@ def recommendable(weights, outweigh=True):
 def taste(weights, performers=0):
     """A scene's taste points, from weigh_tags: what its loved and liked tags add less what its
     disliked ones take off, plus what its PERFORMERS add (see performer_points); None with a
-    hated tag."""
+    hated tag or performer."""
     liked, _, disliked, hated = weights
-    return None if hated else round(liked - disliked + performers)
+    return None if hated or performers is None else round(liked - disliked + performers)
 
 
 def performer_points(people, tags, perf):
-    """What a scene's PEOPLE (performer IDs) add by PERF (performer ID -> (points, why)): all of
-    them, or in a video of several scenes (TAGS has one of MULTI_SCENE_TAGS) the best one and the
-    worst one."""
+    """What a scene's PEOPLE (performer IDs) add by PERF (performer ID -> (points, why), points
+    None for a hated one): all of them, or in a video of several scenes (TAGS has one of
+    MULTI_SCENE_TAGS) the best one and the worst one. None with a hated one."""
     values = [perf[p][0] for p in set(people) if p in perf]
+    if None in values:
+        return None
     if not MULTI_SCENE_TAGS & set(tags):
         return sum(values)
     return max([v for v in values if v > 0], default=0) + min([v for v in values if v < 0], default=0)
@@ -1893,9 +1896,8 @@ class App:
                 self.discover_cache.clear()
 
     def new_with_favourites(self, user, ttl=300):
-        """Discover's row: the newest scenes with the favourite performers (StashDB favourites
-        and those the user follows, as under a scene), none with a tag the user hates or
-        dislikes."""
+        """Discover's row: the newest scenes with the favourite performers (see
+        favourite_performers), none with a tag the user hates or dislikes."""
         favs = self.favourite_performers(user)
         if not favs:
             return []
@@ -1920,10 +1922,12 @@ class App:
         return self.by_feelings(scenes, user)[:DISCOVER_ROW]
 
     def by_feelings(self, scenes, user, rank=True):
-        """SCENES without those the user's tag feelings rule out (with RANK, a disliked tag can be
+        """SCENES without those the user's tag and performer feelings rule out (with RANK, a disliked tag can be
         outweighed), best first if RANK (copies, with their "points"), else in their order. If
         StashDB can't say their tags, as they are."""
-        feel = self.feelings(user)
+        feel, perf = self.feelings(user), self.performer_taste(user)
+        hated = {p for p, (points, _) in perf.items() if points is None}
+        scenes = [sc for sc in scenes if not hated & set(card_people(sc))]
         if not feel:
             return scenes
         tags = self.card_tags(scenes)
@@ -1931,7 +1935,6 @@ class App:
         weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare) for sc in scenes}
         kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
         if rank:  # sorted is stable: the newest first among equals
-            perf = self.performer_taste(user)
             points = {sc["id"]: taste(weights[sc["id"]], performer_points(
                 card_people(sc), tags.get(sc["id"], ()), perf)) for sc in kept}
             kept = sorted(kept, key=lambda sc: -points[sc["id"]])
@@ -2007,8 +2010,9 @@ class App:
         action.sort(key=lambda t: (-feel.get(t, 0), -rare.get(t, 1.0)))
         cast = list(dict.fromkeys(p["performer"]["id"] for p in scene.get("performers") or []))
         perf = self.performer_taste(user)
-        less = {p for p, (points, _) in perf.items() if points < 0}
-        favs = self.favourite_performers(user) - less
+        hated = {p for p, (points, _) in perf.items() if points is None}
+        less = {p: points for p, (points, _) in perf.items() if points is not None and points < 0}
+        favs = self.favourite_performers(user)
 
         def people(sc):
             return {p["performer"]["id"] for p in sc.get("performers") or []}
@@ -2046,7 +2050,8 @@ class App:
             except ApiError as e:
                 print(f"together again for {scene_id}: {e.message}", file=sys.stderr, flush=True)
                 return []
-            found = {sc["id"]: sc for scenes in answers for sc in scenes if sc["id"] != scene_id}
+            found = {sc["id"]: sc for scenes in answers for sc in scenes
+                     if sc["id"] != scene_id and not people(sc) & hated}
             newest = sorted(found.values(), key=lambda sc: sc.get("release_date") or "", reverse=True)
             return sorted(newest, key=lambda sc: -len(people(sc) & set(cast)))
 
@@ -2084,8 +2089,9 @@ class App:
         def tag_score(sc):
             liked, neutral, disliked, _ = weights[sc["id"]]
             return liked + neutral - disliked
-        inner = {sid: sc for sid, sc in inner.items() if recommendable(weights[sid], outweigh=False)}
-        outer = {sid: sc for sid, sc in outer.items() if recommendable(weights[sid])}
+        inner = {sid: sc for sid, sc in inner.items()
+                 if recommendable(weights[sid], outweigh=False) and not people(sc) & hated}
+        outer = {sid: sc for sid, sc in outer.items() if recommendable(weights[sid]) and not people(sc) & hated}
 
         def ranked(found, score):
             """Best first, copies with their "points" (StashDB's cards are cached, shared)."""
@@ -2096,11 +2102,11 @@ class App:
         def inner_score(sc):
             return (SIMILAR_FAV_HERE * len(people(sc) & favs_here)
                     + SIMILAR_FAV_PERFORMER * len(people(sc) & favs - favs_here) + tag_score(sc)
-                    - PERFORMER_DISLIKE * len(people(sc) & less))
+                    + sum(less[p] for p in people(sc) & set(less)))
 
         def outer_score(sc):
             return (SIMILAR_PERFORMER * len(people(sc) & others_here) + tag_score(sc)
-                    - PERFORMER_DISLIKE * len(people(sc) & less))
+                    + sum(less[p] for p in people(sc) & set(less)))
         rows = [("inner", "Similar scenes with favourite performers", "", ranked(inner, inner_score)),
                 ("discover", "Discover similar scenes", "", ranked(outer, outer_score)),
                 ("together", "Together again", "Two or more of this cast in another scene", again)]
@@ -2108,9 +2114,13 @@ class App:
                          for key, title, sub, scenes in rows if scenes]}
 
     def favourite_performers(self, user=None):
-        """StashDB's favourite performers and the ones the user follows: the inner circle."""
-        ids = {f["id"] for f in self.follows(user, "performer")} if user else set()
-        return ids | self.stash_favourites()
+        """The inner circle: StashDB's favourite performers, the ones the user follows and the
+        ones they love or like, but not the ones they dislike or hate."""
+        if not user:
+            return self.stash_favourites()
+        feel = self.performer_feelings(user)
+        ids = {f["id"] for f in self.follows(user, "performer")} | self.stash_favourites()
+        return (ids | {p for p, f in feel.items() if f > 0}) - {p for p, f in feel.items() if f < 0}
 
     def stash_favourites(self):
         """StashDB's favourite performers' IDs (none if it can't say)."""
@@ -2132,31 +2142,34 @@ class App:
             raise ApiError(404, "StashDB has no performer with that ID.")
         perf["stashdb_url"] = f"{STASHDB_WEB}/performers/{pid}"
         perf["follow"] = self.follow_state(user, "performer", pid)
-        perf["less"] = pid in self.performers_less(user)
+        names = {v: k for k, v in FEELINGS.items()}
+        perf["feeling"] = names.get(self.performer_feelings(user).get(pid), "neutral") if user else "neutral"
         return perf
 
-    def performers_less(self, user):
-        """The performers the user wants fewer scenes of: {ID: name}."""
+    def performer_feelings(self, user, named=False):
+        """Performer ID -> the user's feeling for them (2 love ... -2 hate); NAMED: a list of
+        {"id", "name", "feeling"} with the feelings' names."""
         if not user:
-            return {}
-        return {r["performer_id"]: r["name"] for r in self.db.all(
-            "SELECT performer_id, name FROM performer_feelings WHERE user_id = ? AND feeling < 0",
-            (user["id"],))}
+            return [] if named else {}
+        rows = self.db.all("SELECT performer_id, name, feeling FROM performer_feelings WHERE user_id = ? "
+                           "ORDER BY name COLLATE NOCASE", (user["id"],))
+        if named:
+            names = {v: k for k, v in FEELINGS.items()}
+            return [{"id": r["performer_id"], "name": r["name"], "feeling": names[r["feeling"]]} for r in rows]
+        return {r["performer_id"]: r["feeling"] for r in rows}
 
-    def set_performer_less(self, user, pid, less):
-        """Fewer of their scenes (LESS), or as they are: their scenes rank lower in the user's
-        taste, nothing is hidden."""
-        if less:
+    def set_performer_feeling(self, user, pid, feeling):
+        """FEELING: a FEELINGS name, or "neutral" for none."""
+        if feeling == "neutral":
+            self.db.run("DELETE FROM performer_feelings WHERE user_id = ? AND performer_id = ?", (user["id"], pid))
+        else:
             found = self.stash.find_performer(pid)
             if not found:
                 raise ApiError(404, "StashDB has no performer with that ID.")
             self.db.run("INSERT OR REPLACE INTO performer_feelings(user_id, performer_id, name, feeling, created) "
-                        "VALUES (?, ?, ?, -1, ?)", (user["id"], pid, found["name"], now()))
-        else:
-            self.db.run("DELETE FROM performer_feelings WHERE user_id = ? AND performer_id = ?",
-                        (user["id"], pid))
+                        "VALUES (?, ?, ?, ?, ?)", (user["id"], pid, found["name"], FEELINGS[feeling], now()))
         self.forget_discover(user)
-        return {"less": bool(less)}
+        return {"feeling": feeling}
 
     def learned_performers(self, user, at=None):
         """Performer ID -> how much the user likes them by the scenes they requested themselves
@@ -2182,15 +2195,16 @@ class App:
         return {p: 1 - 0.5 ** (n / 2) for p, n in sums.items()}
 
     def performer_taste(self, user):
-        """Performer ID -> (points, why) for the user's taste: favourites and followed ones
-        PERFORMER_POINTS, the ones they requested scenes of up to that (learned_performers), the
-        ones they want less of -PERFORMER_DISLIKE (whatever else they are)."""
+        """Performer ID -> (points, why) for the user's taste: by their feeling for them,
+        PERFORMER_SCORE (a hated one None); without one, favourites and followed ones as liked
+        (PERFORMER_POINTS), the ones they requested scenes of up to that (learned_performers)."""
         if not user:
             return {}
         out = {p: (round(PERFORMER_POINTS * a, 1), "requested") for p, a in self.learned_performers(user).items()}
         out.update((p, (PERFORMER_POINTS, "favourite")) for p in self.stash_favourites())
         out.update((f["id"], (PERFORMER_POINTS, "followed")) for f in self.follows(user, "performer"))
-        out.update((p, (-PERFORMER_DISLIKE, "less")) for p in self.performers_less(user))
+        names = {v: k for k, v in FEELINGS.items()}
+        out.update((p, (PERFORMER_SCORE.get(f), names[f])) for p, f in self.performer_feelings(user).items())
         return out
 
     def studio(self, sid, user):
@@ -2828,6 +2842,7 @@ class Handler(BaseHTTPRequestHandler):
             if user:
                 out["fav_tags"] = app.fav_tags(user)
                 out["tag_feelings"] = app.tag_feelings(user)
+                out["performer_feelings"] = app.performer_feelings(user, named=True)
                 app.remember_origin(self.origin())
                 app.jellyfin.ensure()
                 if app.jellyfin.creds()[1] and app.jellyfin.server_id:
@@ -2974,12 +2989,12 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, app.check_watch(wid), None
 
         # -- account --
-        if key == ("POST", "performer-less"):
+        if key == ("POST", "performer-feelings"):
             body = self.body_json()
-            pid = str(body.get("id", ""))
-            if not id_list(pid):
-                raise ApiError(400, "Which performer?")
-            return 200, app.set_performer_less(user, pid, bool(body.get("less"))), None
+            pid, feeling = str(body.get("id", "")), body.get("feeling")
+            if not id_list(pid) or feeling not in (*FEELINGS, "neutral"):
+                raise ApiError(400, "Which performer, and love, like, neutral, dislike or hate?")
+            return 200, app.set_performer_feeling(user, pid, feeling), None
         if key == ("POST", "prefs"):
             body = self.body_json()
             if body.get("performer_sort") not in ("TASTE", "DATE"):
