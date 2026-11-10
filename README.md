@@ -260,4 +260,5 @@ Logs: `journalctl --user -u desireerr`.
 python3 -m unittest discover -s tests
 python3 desireerr.py --port 5099 --data /tmp/d/data --cache /tmp/d/cache
 python3 tools/make_icons.py     # redraw the PNG icons after changing the logo
+python3 tools/make_social.py    # GitHub's social preview, .github/social-preview.png
 ```
