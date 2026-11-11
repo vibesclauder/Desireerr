@@ -39,7 +39,7 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.1"
+VERSION = "1.2"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
@@ -87,6 +87,9 @@ DISCOVER_POOL = 100          # "New with tags you love or like" picks from this 
 # more, within these bounds. Each tag's scenes are counted every TAG_COUNT_TTL.
 RARITY_TYPICAL = 30000
 RARITY_MIN, RARITY_MAX = 0.25, 3.0
+# Sommelier mode (a user's choice): each loved, liked or disliked tag's points times the user's
+# own multiplier for it, within these bounds, after its rarity. Off, they're kept but don't count.
+TUNE_MIN, TUNE_MAX = 0.25, 4.0
 TAG_COUNT_TTL = 7 * 86400
 # Performers in the taste score, by the user's feeling for them (FEELINGS, as for tags; a hated
 # one: never recommended). Without one, a followed performer counts as liked, and one whose
@@ -323,6 +326,8 @@ COLUMNS = [
     ("requests", "searched_at", "INTEGER"),                 # last "search again"
     ("watches", "follow", "TEXT NOT NULL DEFAULT ''"),      # "performer:<id>": a follow
     ("users", "performer_sort", "TEXT NOT NULL DEFAULT 'TASTE'"),  # a performer's scenes: TASTE, DATE
+    ("users", "sommelier", "INTEGER NOT NULL DEFAULT 0"),   # the tags' multipliers count
+    ("tag_feelings", "multiplier", "REAL NOT NULL DEFAULT 1"),  # sommelier mode's, see TUNE_MIN
 ]
 
 
@@ -447,6 +452,7 @@ STUDIO_SORTS = {"NAME", "CREATED_AT", "UPDATED_AT"}
 TAG_MODES = {"all": "INCLUDES_ALL", "any": "INCLUDES"}
 GENDERS = {"MALE", "FEMALE", "TRANSGENDER_MALE", "TRANSGENDER_FEMALE", "INTERSEX", "NON_BINARY",
            "UNKNOWN"}
+ETHNICITIES = {"CAUCASIAN", "BLACK", "ASIAN", "INDIAN", "LATIN", "MIDDLE_EASTERN", "MIXED", "OTHER"}
 
 
 class StashDB:
@@ -1275,13 +1281,15 @@ def rarity(scenes, total):
     return min(RARITY_MAX, max(RARITY_MIN, factor))
 
 
-def weigh_tags(tags, feel, mine=frozenset(), rare=None):
+def weigh_tags(tags, feel, mine=frozenset(), rare=None, tune=None):
     """What a scene's TAGS add by the user's feelings for them (FEEL: tag ID -> feeling), as
     FEELING_SCORE has it, MINE being the tags of the scene it's compared with, the loved, liked
     and neutral ones by their rarity (RARE: tag ID -> rarity, 1 if not there; a disliked one
-    weighs the same however common): (what its loved and liked tags add, what its neutral ones
-    add, what its disliked ones take off, whether it has a hated one)."""
-    rare = rare or {}
+    weighs the same however common), then the ones with a feeling by the user's multiplier
+    (TUNE: tag ID -> multiplier, 1 if not there; see App.tuning): (what its loved and liked
+    tags add, what its neutral ones add, what its disliked ones take off, whether it has a
+    hated one)."""
+    rare, tune = rare or {}, tune or {}
     liked = neutral = disliked = 0
     for t in set(tags):
         f = feel.get(t, 0)
@@ -1290,6 +1298,8 @@ def weigh_tags(tags, feel, mine=frozenset(), rare=None):
         points = FEELING_SCORE[f][t in mine]
         if f >= 0:
             points *= rare.get(t, 1.0)
+        if f:
+            points *= tune.get(t, 1.0)
         if f > 0:
             liked += points
         elif f < 0:
@@ -1428,7 +1438,7 @@ class App:
         if not token:
             return None
         return self.db.one(
-            "SELECT u.id, u.username, u.is_admin, u.auto_approve, u.performer_sort FROM sessions s "
+            "SELECT u.id, u.username, u.is_admin, u.auto_approve, u.performer_sort, u.sommelier FROM sessions s "
             "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires > ?",
             (hashlib.sha256(token.encode()).hexdigest(), now()))
 
@@ -1493,10 +1503,10 @@ class App:
             return scenes
         feel, perf = self.feelings(user), self.performer_taste(user)
         if feel or perf:
-            rare, tags = self.rarities(), self.card_tags(scenes)
+            rare, tune, tags = self.rarities(), self.tuning(user), self.card_tags(scenes)
             for s in scenes:
                 have = tags.get(s["id"], ())
-                s["taste"] = taste(weigh_tags(have, feel, rare=rare),
+                s["taste"] = taste(weigh_tags(have, feel, rare=rare, tune=tune),
                                    performer_points(card_people(s), have, perf))
                 s["hated"] = s["taste"] is None
         for s in scenes:
@@ -1845,6 +1855,52 @@ class App:
         self.forget_discover(user)
         return self.tag_feelings(user)
 
+    # -- sommelier mode: the user's own multiplier for each tag they have a feeling for --------
+    def tuning(self, user):
+        """tag ID -> the user's multiplier for it, in sommelier mode ({} otherwise, or at 1)."""
+        if not user or not user.get("sommelier"):
+            return {}
+        return {r["tag_id"]: r["multiplier"] for r in self.db.all(
+            "SELECT tag_id, multiplier FROM tag_feelings WHERE user_id = ? AND multiplier != 1 "
+            "AND feeling > ?", (user["id"], FEELINGS["hate"]))}
+
+    def sommelier(self, user):
+        """The tags the user loves, likes or dislikes, each with its rarity, its points as
+        they are (FEELING_SCORE's in another scene, times the rarity unless disliked), the
+        user's multiplier and the points with it: the Sommelier page."""
+        rare, names = self.rarities(), {v: k for k, v in FEELINGS.items()}
+        rows = self.db.all("SELECT tag_id AS id, name, feeling, multiplier FROM tag_feelings "
+                           "WHERE user_id = ? AND feeling > ? ORDER BY name COLLATE NOCASE",
+                           (user["id"], FEELINGS["hate"]))
+        out = []
+        for r in rows:
+            f = r["feeling"]
+            rarity = rare.get(r["id"], 1.0) if f > 0 else 1.0
+            base = FEELING_SCORE[f][0] * rarity
+            out.append(dict(r, feeling=names[f], rarity=round(rarity, 2), base=round(base, 2),
+                            points=round(base * r["multiplier"], 2)))
+        return {"on": bool(user.get("sommelier")), "min": TUNE_MIN, "max": TUNE_MAX,
+                "rarities_counted": bool(rare), "tags": out}
+
+    def set_multiplier(self, user, tag_id, multiplier):
+        """The user's MULTIPLIER for a tag they have a feeling for (None: all of theirs back to 1)."""
+        if tag_id is None:
+            self.db.run("UPDATE tag_feelings SET multiplier = 1 WHERE user_id = ?", (user["id"],))
+        else:
+            value = round(min(TUNE_MAX, max(TUNE_MIN, float(multiplier))), 2)
+            if not self.db.one("SELECT 1 FROM tag_feelings WHERE user_id = ? AND tag_id = ?", (user["id"], tag_id)):
+                raise ApiError(404, "Love, like or dislike the tag first.")
+            self.db.run("UPDATE tag_feelings SET multiplier = ? WHERE user_id = ? AND tag_id = ?",
+                        (value, user["id"], tag_id))
+        self.forget_discover(user)
+        return self.sommelier(user)
+
+    def forget_taste(self, user):
+        """Scores made anew: the user's Discover rows (with their performers you might like),
+        and the tags' rarities read again from their last count."""
+        self.forget_discover(user)
+        self.rare = None
+
     def rarities(self):
         """Each tag's rarity (tag ID -> rarity), as counted by count_tags; until then none."""
         if self.rare is None:
@@ -1996,8 +2052,8 @@ class App:
         if not feel:
             return scenes
         tags = self.card_tags(scenes)
-        rare = self.rarities()
-        weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare) for sc in scenes}
+        rare, tune = self.rarities(), self.tuning(user)
+        weights = {sc["id"]: weigh_tags(tags.get(sc["id"], ()), feel, rare=rare, tune=tune) for sc in scenes}
         kept = [sc for sc in scenes if recommendable(weights[sc["id"]], outweigh=rank)]
         if rank:  # sorted is stable: the newest first among equals
             points = {sc["id"]: taste(weights[sc["id"]], performer_points(
@@ -2025,11 +2081,11 @@ class App:
         feel, perf = self.feelings(user), self.performer_taste(user)
         if feel or perf:
             scene = dict(scene)  # StashDB's answer is cached
-            rare = self.rarities()
+            rare, tune = self.rarities(), self.tuning(user)
             tags = [t["id"] for t in scene.get("tags") or []]
             parts, names = [], {v: k for k, v in FEELINGS.items()}
             for t in scene.get("tags") or []:
-                points = weigh_tags([t["id"]], feel, rare=rare)
+                points = weigh_tags([t["id"]], feel, rare=rare, tune=tune)
                 if feel.get(t["id"], 0):
                     parts.append({"kind": "tag", "id": t["id"], "name": t["name"], "feeling": names[feel[t["id"]]],
                                   "points": None if points[3] else round(points[0] - points[2], 1)})
@@ -2039,7 +2095,8 @@ class App:
                     points, why = perf[pid]
                     parts.append({"kind": "performer", "id": pid, "name": p.get("as") or p["performer"]["name"],
                                   "why": why, "points": points})
-            scene["taste"] = taste(weigh_tags(tags, feel, rare=rare), performer_points(card_people(scene), tags, perf))
+            scene["taste"] = taste(weigh_tags(tags, feel, rare=rare, tune=tune),
+                                   performer_points(card_people(scene), tags, perf))
             scene["taste_parts"] = sorted(parts, key=lambda t: -abs(t["points"] if t["points"] is not None else 99))
             scene["taste_several"] = bool(MULTI_SCENE_TAGS & set(tags))  # performers: best and worst only
         return scene
@@ -2149,7 +2206,8 @@ class App:
             outer.pop(sid, None)
         their_tags = self.card_tags(list({**inner, **outer}.values()))
 
-        weights = {sid: weigh_tags(their_tags.get(sid, ()), feel, mine, rare) for sid in {**inner, **outer}}
+        tune = self.tuning(user)
+        weights = {sid: weigh_tags(their_tags.get(sid, ()), feel, mine, rare, tune) for sid in {**inner, **outer}}
 
         def tag_score(sc):
             liked, neutral, disliked, _ = weights[sc["id"]]
@@ -2217,7 +2275,7 @@ class App:
         feel, perf = self.feelings(user), self.performer_taste(user)
         if not ids or not (feel or perf):
             return {}
-        rare, ids = self.rarities(), list(ids)
+        rare, tune, ids = self.rarities(), self.tuning(user), list(ids)
         chunks = [ids[i:i + 15] for i in range(0, len(ids), 15)]
 
         def ask(chunk):
@@ -2235,7 +2293,7 @@ class App:
         for pid, scenes in zip(ids, answers):
             if scenes:
                 tags = self.card_tags(scenes)
-                values = [taste(weigh_tags(tags.get(sc["id"], ()), feel, rare=rare),
+                values = [taste(weigh_tags(tags.get(sc["id"], ()), feel, rare=rare, tune=tune),
                                 performer_points(card_people(sc), tags.get(sc["id"], ()), perf))
                           for sc in scenes]
                 out[pid] = sum(-10 if v is None else v for v in values) / len(values)
@@ -2526,6 +2584,20 @@ class App:
             inp["gender"] = q["gender"]
         if q.get("favorites") == "1":
             inp["is_favorite"] = True
+        if re.fullmatch(r"[A-Z]{2}", q.get("country") or ""):
+            inp["country"] = {"value": q["country"], "modifier": "EQUALS"}
+        if q.get("ethnicity") in ETHNICITIES:
+            inp["ethnicity"] = q["ethnicity"]
+        # Born from one year to another, both in. StashDB takes one criterion per field, so the
+        # range is two fields: the birth date after the year before FROM (a bare year counts as
+        # 1 January), and the birth year before the one after TO (a bare year's date wouldn't be).
+        years = [clamp_int(q.get(k), None, 1900, 2100) for k in ("born_from", "born_to")]
+        if None not in years and years[0] > years[1]:
+            years.reverse()
+        if years[0]:
+            inp["birthdate"] = {"value": f"{years[0] - 1}-12-31", "modifier": "GREATER_THAN"}
+        if years[1]:
+            inp["birth_year"] = {"value": years[1] + 1, "modifier": "LESS_THAN"}
         return self.stash.query_performers(inp)
 
     def browse_studios(self, q):
@@ -3228,9 +3300,27 @@ class Handler(BaseHTTPRequestHandler):
             return 200, app.set_performer_feeling(user, pid, feeling), None
         if key == ("POST", "prefs"):
             body = self.body_json()
-            if body.get("performer_sort") not in ("TASTE", "DATE"):
-                raise ApiError(400, "Sort a performer's scenes by TASTE or DATE.")
-            app.db.run("UPDATE users SET performer_sort = ? WHERE id = ?", (body["performer_sort"], user["id"]))
+            if "performer_sort" not in body and "sommelier" not in body:
+                raise ApiError(400, "Which preference?")
+            if "performer_sort" in body:
+                if body["performer_sort"] not in ("TASTE", "DATE"):
+                    raise ApiError(400, "Sort a performer's scenes by TASTE or DATE.")
+                app.db.run("UPDATE users SET performer_sort = ? WHERE id = ?", (body["performer_sort"], user["id"]))
+            if "sommelier" in body:
+                app.db.run("UPDATE users SET sommelier = ? WHERE id = ?", (int(bool(body["sommelier"])), user["id"]))
+                app.forget_discover(user)
+            return 200, {"ok": True}, None
+        if key == ("GET", "sommelier"):
+            return 200, app.sommelier(user), None
+        if key == ("POST", "sommelier"):
+            body = self.body_json()
+            if body.get("reset"):
+                return 200, app.set_multiplier(user, None, 1), None
+            if not id_list(body.get("id")) or not isinstance(body.get("multiplier"), (int, float)):
+                raise ApiError(400, "A multiplier takes a tag ID and a number.")
+            return 200, app.set_multiplier(user, body["id"], body["multiplier"]), None
+        if key == ("POST", "taste-cache"):
+            app.forget_taste(user)
             return 200, {"ok": True}, None
         if key == ("POST", "password"):
             body = self.body_json()

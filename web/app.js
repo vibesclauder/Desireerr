@@ -138,6 +138,16 @@ function fmtAgo(ts) {
   return new Date(ts * 1000).toLocaleDateString();
 }
 const titleCase = (s) => (s || "").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+// StashDB keeps countries as ISO codes; they're named in the browser's language.
+const regionNames = (() => { try { return new Intl.DisplayNames(undefined, { type: "region" }); } catch { return null; } })();
+const countryName = (code) => { try { return regionNames?.of(code) || code; } catch { return code; } };
+const COUNTRIES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS " +
+  "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET " +
+  "FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO " +
+  "IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH " +
+  "MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM " +
+  "PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG " +
+  "TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW").split(" ");
 const performerName = (p) => p.as || p.performer?.name || "";
 // Tag feelings are Desireerr's own (StashDB has none), per user; status carries them.
 // A user's feeling for a tag (neutral without one), and how a tag chip shows it. Clicking a
@@ -251,6 +261,7 @@ const ICONS = {
   similar: '<circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>',
   sparkle: '<path fill="currentColor" stroke="none" d="M12 2c.8 5.6 4.4 9.2 10 10-5.6.8-9.2 4.4-10 10-.8-5.6-4.4-9.2-10-10 5.6-.8 9.2-4.4 10-10z"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/>',
+  wine: '<path d="M7.5 3h9c.4 4.6-1.4 8-4.5 8S7.1 7.6 7.5 3zM12 11v9.5M8.5 20.5h7"/>',
 };
 const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`);
 
@@ -277,6 +288,7 @@ const ROUTES = [
   [/^\/requests$/, viewRequests, "requests"],
   [/^\/saved$/, viewSaved, "saved"],
   [/^\/settings$/, viewSettings, "settings"],
+  [/^\/sommelier$/, viewSommelier, "sommelier"],
 ];
 
 function go(path, replace = false) {
@@ -364,6 +376,7 @@ function shell() {
     ["/performers", "users", "Performers", "performers"],
     ["/studios", "building", "Studios", "studios"],
     ["/tags", "tag", "Tags", "tags"],
+    ["/sommelier", "wine", "Sommelier", "sommelier"],
     ["/requests", "inbox", "Requests", "requests"],
     ["/saved", "bookmark", "Saved searches", "saved"],
     ["/settings", "settings", "Settings", "settings"],
@@ -373,7 +386,7 @@ function shell() {
       <aside class="sidebar" aria-label="Main">
         <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="38" height="38"><span class="wordmark">Desir<b>eerr</b></span></a>
         <nav class="nav">
-          ${nav.map(([href, ic, label, key]) => html`<a href="${href}" data-nav="${key}">${icon(ic)}<span>${label}</span>${key === "requests" ? html`<span class="count" data-pending hidden></span>` : ""}</a>`)}
+          ${nav.map(([href, ic, label, key]) => html`<a href="${href}" data-nav="${key}" ${key === "sommelier" && !me.sommelier ? "hidden" : ""}>${icon(ic)}<span>${label}</span>${key === "requests" ? html`<span class="count" data-pending hidden></span>` : ""}</a>`)}
         </nav>
         <div class="side-foot">
           <div class="side-user"><span class="avatar">${me.username.slice(0, 1)}</span><div class="who"><div>${me.username}</div><div class="role">${me.is_admin ? "Admin" : me.auto_approve ? "Auto-approved" : "User"}</div></div></div>
@@ -511,7 +524,7 @@ function tasteLine(s) {
   if (s.taste === undefined) return "";
   const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
   const parts = (s.taste_parts || []).slice(0, 8);
-  return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less), and its performers: favourites and followed ones, the ones you request, and the ones you want less of${s.taste_several ? ". It's cut together from several scenes, so only the best and the worst performer count." : ""}">
+  return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less${me.sommelier ? ", times your Sommelier multipliers" : ""}), and its performers: favourites and followed ones, the ones you request, and the ones you want less of${s.taste_several ? ". It's cut together from several scenes, so only the best and the worst performer count." : ""}">
     ${s.taste === null ? html`<span class="points hated">${icon("ban")}</span>` : html`<span class="points">${icon("sparkle")}${s.taste}</span>`}
     ${parts.map((t) => t.kind === "performer"
       ? html`<span class="${t.points === null || t.points < 0 ? "feel-dislike" : "feel-like"}">${t.name} ${t.points === null ? "" : sign(t.points)} <small>(${WHY[t.why]})</small></span>`
@@ -1030,7 +1043,6 @@ function lightbox(images, start = 0, title = "") {
     if (zoomed) return;
     const ok = mouse && img.naturalWidth > 0 &&
       (img.naturalWidth > img.clientWidth + 1 || img.naturalHeight > img.clientHeight + 1);
-    el.classList.toggle("can-zoom", ok);
     if (zoomBtn) zoomBtn.hidden = !ok;
   };
   const zoom = (on, cx, cy) => {
@@ -1063,7 +1075,6 @@ function lightbox(images, start = 0, title = "") {
     zoom(false);
     i = (n + images.length) % images.length;
     el.classList.add("loading");
-    el.classList.remove("can-zoom");
     if (zoomBtn) zoomBtn.hidden = true;
     img.onload = () => { el.classList.remove("loading"); updateZoomable(); };
     img.onerror = () => el.classList.remove("loading");
@@ -1085,9 +1096,9 @@ function lightbox(images, start = 0, title = "") {
     back?.focus?.();
   };
 
-  // On the picture: drag to move around when zoomed; otherwise a swipe pages. A tap outside
-  // the picture closes, a click on it zooms or (zoomed, without dragging) fits it again.
-  // A drag also ends in a click, which is then ignored.
+  // On the picture: drag to move around when zoomed; otherwise a swipe pages. A tap on the
+  // picture or around it closes; zoomed, a click without dragging fits it again (the button
+  // zooms). A drag also ends in a click, which is then ignored.
   let drag = null, swallow = false;
   stage.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
@@ -1128,8 +1139,7 @@ function lightbox(images, start = 0, title = "") {
     else if (e.target.closest(".lb-zoom")) zoom(!zoomed);
     else if (e.target.closest(".lb-prev")) show(i - 1);
     else if (e.target.closest(".lb-next")) show(i + 1);
-    else if (e.target === img) { if (el.classList.contains("can-zoom")) zoom(true, e.clientX, e.clientY); }
-    else if (e.target === el || e.target === stage) closeLightbox();
+    else if (e.target === img || e.target === el || e.target === stage) closeLightbox();
   });
   document.addEventListener("keydown", onKey);
   window.addEventListener("resize", onResize);
@@ -1332,7 +1342,7 @@ async function viewPerformer(view, id, ctx) {
     ["Aliases", (p.aliases || []).join(", ")],
     ["Born", fmtDate(p.birth_date) + (ageNow ? ` (${ageNow})` : "")],
     ["Died", p.death_date ? fmtDate(p.death_date) + (ageEnd ? ` (aged ${ageEnd})` : "") : ""],
-    ["Country", p.country],
+    ["Country", p.country ? html`<a href="/performers${qs({ country: p.country, gender: p.gender })}" title="More from here">${countryName(p.country)}</a>` : ""],
     ["Ethnicity", titleCase(p.ethnicity)],
     ["Hair", titleCase(p.hair_color)],
     ["Eyes", titleCase(p.eye_color)],
@@ -1353,7 +1363,7 @@ async function viewPerformer(view, id, ctx) {
         : html`<div class="hero-poster portrait">${noImg("users")}</div>`}
         <div class="hero-info">
           ${photos.length > 1 ? html`<div class="hero-photos" aria-label="Photos">${photos.map((ph, i) => html`<button type="button" class="card thumb-btn" data-photo="${i}" aria-label="Photo ${i + 1} of ${photos.length}"><div class="thumb"><img src="${imgUrl(ph.url, 200)}" alt="" loading="lazy" decoding="async"></div></button>`)}</div>` : ""}
-          <div class="kicker">${[titleCase(p.gender), p.country].filter(Boolean).join(" · ")}</div>
+          <div class="kicker">${[titleCase(p.gender), p.country && countryName(p.country)].filter(Boolean).join(" · ")}</div>
           <h1>${p.name}${p.death_date ? html` <span class="dagger" title="Died ${fmtDate(p.death_date)}">†</span>` : ""}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
@@ -1435,7 +1445,7 @@ async function viewTags(view, ctx) {
   const byGroup = {};
   for (const c of categories) (byGroup[c.group] ||= []).push(c);
   view.innerHTML = html`<div class="page">
-    <div class="page-title"><h1>Tags</h1><span class="sub">Click a tag to say how you feel about it; its magnifier opens its scenes, where you can add more tags to combine them.</span></div>
+    <div class="page-title"><h1>Tags</h1><span class="sub">Click a tag to say how you feel about it; its magnifier opens its scenes, where you can add more tags to combine them.${me.sommelier ? html` <a href="/sommelier">Fine-tune them in Sommelier.</a>` : ""}</span></div>
     ${[["love", "Tags you love"], ["like", "Tags you like"], ["dislike", "Tags you dislike"], ["hate", "Tags you hate"]].map(([k, title]) => {
       const ts = (status.tag_feelings || []).filter((t) => t.feeling === k);
       return ts.length ? html`<section class="section" style="gap:10px"><div class="section-head"><h2>${title}</h2>${k === "love" || (k === "like" && !status.tag_feelings.some((t) => t.feeling === "love")) ? html`<a class="more" href="/scenes?fav_tags=1">Scenes with any you love or like${icon("chevron")}</a>` : ""}</div>
@@ -1523,7 +1533,11 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
       if (my === seq && ctx.alive()) more.innerHTML = errorBox(e).s;
     } finally { loading = false; }
   }
-  el.addEventListener("input", debounce((e) => { if (e.target.matches("input[type=search]")) { f[e.target.name] = e.target.value.trim(); sync(); } }, 400));
+  el.addEventListener("input", debounce((e) => {
+    const v = e.target.value.trim();
+    // A year only once it has four digits, not on the way there.
+    if (e.target.matches("input[type=search]") || (e.target.matches("input.year") && /^(\d{4})?$/.test(v))) { f[e.target.name] = v; sync(); }
+  }, 400));
   el.addEventListener("change", (e) => {
     if (e.target.matches("select")) { f[e.target.name] = e.target.value; sync(); }
     if (e.target.matches("input[type=checkbox]")) { f[e.target.name] = e.target.checked ? "1" : ""; sync(); }
@@ -1555,11 +1569,17 @@ async function viewPerformers(view, ctx) {
     <div class="section" id="list"></div></div>`.s;
   await listBrowser($("#list", view), ctx, {
     endpoint: "performers", key: "performers", card: personCard, gridClass: "people",
-    defaults: { q: "", sort: "POPULARITY", gender: "FEMALE", favorites: "" },
+    defaults: { q: "", sort: "POPULARITY", gender: "FEMALE", country: "", ethnicity: "", born_from: "", born_to: "", favorites: "" },
     controls: (f) => html`
       <label class="field grow"><span>Name</span><input class="input" type="search" name="q" value="${f.q}" placeholder="Name or alias"></label>
-      <label class="field"><span>Sort</span><select class="input" name="sort">${[["POPULARITY", "Most popular"], ["SCENE_COUNT", "Most scenes"], ["LAST_SCENE", "Latest scene"], ["DEBUT", "Newest debut"], ["CREATED_AT", "Newly added to StashDB"], ["NAME", "Name"]].map(([v, l]) => option(v, l, f.sort))}</select></label>
+      <label class="field"><span>Sort</span><select class="input" name="sort">${[["POPULARITY", "Most popular"], ["SCENE_COUNT", "Most scenes"], ["LAST_SCENE", "Latest scene"], ["DEBUT", "Newest debut"], ["CREATED_AT", "Newly added to StashDB"], ["BIRTHDATE", "Youngest"], ["NAME", "Name"]].map(([v, l]) => option(v, l, f.sort))}</select></label>
       <label class="field"><span>Gender</span><select class="input" name="gender">${[["ANY", "Any"], ["FEMALE", "Female"], ["MALE", "Male"], ["TRANSGENDER_FEMALE", "Trans female"], ["TRANSGENDER_MALE", "Trans male"], ["NON_BINARY", "Non-binary"], ["INTERSEX", "Intersex"]].map(([v, l]) => option(v, l, f.gender))}</select></label>
+      <label class="field"><span>Country</span><select class="input" name="country">${option("", "Any", f.country)}${COUNTRIES.map((c) => [c, countryName(c)]).sort((a, b) => a[1].localeCompare(b[1])).map(([v, l]) => option(v, l, f.country))}</select></label>
+      <label class="field"><span>Ethnicity</span><select class="input" name="ethnicity">${["", "CAUCASIAN", "BLACK", "ASIAN", "INDIAN", "LATIN", "MIDDLE_EASTERN", "MIXED", "OTHER"].map((v) => option(v, titleCase(v) || "Any", f.ethnicity))}</select></label>
+      <div class="field"><span>Born</span><div class="years">
+        <input class="input year" type="text" inputmode="numeric" maxlength="4" name="born_from" value="${f.born_from}" placeholder="From" aria-label="Born from (year)">
+        <span>to</span>
+        <input class="input year" type="text" inputmode="numeric" maxlength="4" name="born_to" value="${f.born_to}" placeholder="To" aria-label="Born to (year)"></div></div>
       <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="favorites" ${f.favorites ? "checked" : ""}> Loved or liked only</label>`,
   });
 }
@@ -1691,6 +1711,117 @@ const NOTIFY_EVENTS = [
   ["stalled", "A request finds no release for too long (set under Whisparr)"],
 ];
 
+// ---------------------------------------------------------------------------------------
+// Sommelier: in sommelier mode, a multiplier for each tag the user loves, likes or dislikes
+// ---------------------------------------------------------------------------------------
+
+async function setSommelier(on) {
+  await api("prefs", { method: "POST", body: { sommelier: on } });
+  me.sommelier = on ? 1 : 0;
+  listMemory.clear();
+  $$('[data-nav="sommelier"]').forEach((a) => { a.hidden = !on; });
+}
+
+async function viewSommelier(view, ctx) {
+  let data = await api("sommelier");
+  if (!ctx.alive()) return;
+  const num = (n) => String(Math.round(n * 100) / 100);
+  const pts = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(1);
+  const rarity = (t) => t.feeling === "dislike" ? "rarity doesn't count"
+    : t.rarity < 0.95 ? `common, ×${num(t.rarity)}` : t.rarity > 1.05 ? `rare, ×${num(t.rarity)}` : "typical";
+  const worth = (t, m) => m === 1 ? html`${pts(t.base)}` : html`<s>${pts(t.base)}</s> ${pts(t.base * m)}`;
+  const row = (t) => html`<div class="somm-row" data-tag="${t.id}">
+    <a class="chip feel-${t.feeling}" href="/tag/${t.id}">${icon(feelingIcon(t.feeling))}${t.name}</a>
+    <span class="somm-rarity">${rarity(t)}</span>
+    <input type="range" min="${data.min}" max="${data.max}" step="0.25" value="${t.multiplier}" aria-label="Multiplier for ${t.name}">
+    <output class="somm-mult">${num(t.multiplier)}×</output>
+    <span class="somm-points" title="What it adds to a scene's taste">${worth(t, t.multiplier)}</span>
+    <button type="button" class="btn small ghost somm-one" title="Back to 1×" ${t.multiplier === 1 ? "hidden" : ""}>1×</button>
+  </div>`;
+  // Listeners go on this visit's page, not on #view, where they'd pile up across visits.
+  view.innerHTML = html`<div class="page"></div>`.s;
+  const page = $(".page", view);
+  const draw = () => {
+    const groups = [["love", "Tags you love"], ["like", "Tags you like"], ["dislike", "Tags you dislike"]]
+      .map(([k, title]) => [title, data.tags.filter((t) => t.feeling === k)]).filter(([, ts]) => ts.length);
+    page.innerHTML = html`
+      <div class="page-title"><h1>Sommelier</h1><span class="sub">How much each tag counts in your taste: its points as they are (a rare tag more, a common one less), times your multiplier. In the reels under a scene, a tag both scenes have counts more, by the same multiplier.</span></div>
+      <div class="btns">
+        <button type="button" class="btn" id="s-cache" title="Discover's rows are kept for an hour and lists you go back to for 15 minutes: score them anew now">${icon("refresh")}Reset score cache</button>
+        <button type="button" class="btn ghost" id="s-reset" ${data.tags.some((t) => t.multiplier !== 1) ? "" : "disabled"}>All back to 1×</button>
+      </div>
+      ${data.on ? "" : html`<section class="panel"><p class="lede" style="margin:0">Sommelier mode is off, so these multipliers are kept but don't count.</p><div class="btns"><button type="button" class="btn primary" id="s-on">${icon("wine")}Turn it on</button></div></section>`}
+      ${data.rarities_counted ? "" : html`<p class="note">Tags' rarities aren't counted yet, so each counts as typical for now.</p>`}
+      ${groups.length ? groups.map(([title, ts]) => html`<section class="section" style="gap:10px"><div class="section-head"><h2>${title}</h2></div>
+        <div class="somm-list">${ts.map(row)}</div></section>`)
+        : html`<div class="empty">Love, like or dislike some tags first (click any tag, or see <a href="/tags">Tags</a>).</div>`}`.s;
+  };
+  draw();
+  const find = (el) => data.tags.find((t) => t.id === el.closest(".somm-row")?.dataset.tag);
+  const show = (rowEl, t, m) => {
+    $(".somm-mult", rowEl).textContent = `${num(m)}×`;
+    $(".somm-points", rowEl).innerHTML = worth(t, m).s;
+    $(".somm-one", rowEl).hidden = m === 1;
+  };
+  const save = async (rowEl, t, m) => {
+    try {
+      data = await api("sommelier", { method: "POST", body: { id: t.id, multiplier: m } });
+      listMemory.clear();
+      $("#s-reset", page).disabled = !data.tags.some((x) => x.multiplier !== 1);
+    } catch (err) {
+      toast(err.message, true);
+      $("input[type=range]", rowEl).value = t.multiplier;
+      show(rowEl, t, t.multiplier);
+    }
+  };
+  page.addEventListener("input", (e) => {
+    const t = e.target.matches(".somm-row input[type=range]") && find(e.target);
+    if (t) show(e.target.closest(".somm-row"), t, +e.target.value);
+  });
+  page.addEventListener("change", (e) => {
+    const t = e.target.matches(".somm-row input[type=range]") && find(e.target);
+    if (t) save(e.target.closest(".somm-row"), t, +e.target.value);
+  });
+  page.addEventListener("click", async (e) => {
+    const one = e.target.closest(".somm-one");
+    if (one) {
+      const rowEl = one.closest(".somm-row"), t = find(one);
+      $("input[type=range]", rowEl).value = 1;
+      show(rowEl, t, 1);
+      return save(rowEl, t, 1);
+    }
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.id === "s-cache") {
+      b.classList.add("busy");
+      try {
+        await api("taste-cache", { method: "POST" });
+        listMemory.clear();
+        toast("Scores are made anew from here on.");
+      } catch (err) { toast(err.message, true); } finally { b.classList.remove("busy"); }
+    } else if (b.id === "s-reset") {
+      if (b.dataset.sure !== "1") {
+        b.dataset.sure = "1"; b.textContent = "Every tag back to 1×?";
+        setTimeout(() => { if (b.isConnected) { b.dataset.sure = ""; b.textContent = "All back to 1×"; } }, 4000);
+        return;
+      }
+      try {
+        data = await api("sommelier", { method: "POST", body: { reset: true } });
+        listMemory.clear();
+        draw();
+        toast("Every tag counts as it is again.");
+      } catch (err) { toast(err.message, true); }
+    } else if (b.id === "s-on") {
+      try {
+        await setSommelier(true);
+        data.on = true;
+        draw();
+        toast("Sommelier mode is on: your multipliers count.");
+      } catch (err) { toast(err.message, true); }
+    }
+  });
+}
+
 async function viewSettings(view, ctx) {
   const parts = [];
   let s = null, users = null;
@@ -1713,6 +1844,8 @@ async function viewSettings(view, ctx) {
       <option value="TASTE" ${me.performer_sort !== "DATE" ? "selected" : ""}>Your taste (of the newest 500)</option>
       <option value="DATE" ${me.performer_sort === "DATE" ? "selected" : ""}>Newest</option>
     </select></label>
+    <label class="check"><input type="checkbox" id="pf-somm" ${me.sommelier ? "checked" : ""}> Sommelier mode: fine-tune how much each tag you love, like or dislike counts, on a page of its own</label>
+    <a class="btn ghost" href="/sommelier" id="pf-somm-open" style="justify-self:start" ${me.sommelier ? "" : "hidden"}>${icon("wine")}Open Sommelier</a>
   </section>`;
   const privacy = html`<section class="panel">
     <h2>On this device</h2>
@@ -1861,6 +1994,13 @@ async function viewSettings(view, ctx) {
     toast("Password changed. Other devices are signed out.");
   });
   $("#pv-covers", view).onchange = (e) => setCovers(e.target.checked);
+  $("#pf-somm", view).onchange = async (e) => {
+    try {
+      await setSommelier(e.target.checked);
+      $("#pf-somm-open", view).hidden = !e.target.checked;
+      toast(e.target.checked ? "Sommelier mode is on: your multipliers count." : "Sommelier mode is off: your multipliers are kept, but don't count.");
+    } catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }
+  };
   $("#pf-sort", view).onchange = async (e) => {
     try {
       await api("prefs", { method: "POST", body: { performer_sort: e.target.value } });

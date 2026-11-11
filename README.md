@@ -46,6 +46,10 @@ or available.
 
   A scene with a disliked tag is never in the first reel, and in Discover only if the tags
   you love and like outweigh its disliked ones.
+- **Find performers** by name, gender, country, ethnicity and the years they were born in
+  (1987 to 1989, say), most popular, youngest or newest first. That's all of StashDB's
+  performer filters that work: it takes hair, eyes, breasts, cup, height, career and tattoos
+  but ignores them. A performer's country links to the others from there.
 - **Similar performers.** StashDB has no such search, and ignores most of its looks filters,
   so Desireerr scores them itself: out of 100, how alike two performers are by country (25),
   when they started (20), hair (15; black and brunette are close), birth year (10), ethnicity
@@ -159,6 +163,12 @@ On a phone, open it and "Add to home screen" for an app icon.
   that match the filters, best first; a performer's page does that to start with (Settings,
   Your taste: or newest first). In the reels under a scene, a similarity score (two
   circles) sits above it: what they're ranked by.
+  **Sommelier mode** (Settings, Your taste) fine-tunes it: a Sommelier page lists the tags
+  you love, like or dislike, each with what it's worth (its points and rarity, as above) and
+  a multiplier from 0.25× to 4× that scales it wherever your taste counts: scene cards, *Your
+  taste*, Discover, the reels under a scene and the performers you might like. Turned off,
+  the multipliers are kept but don't count. Its *Reset score cache* button scores Discover's
+  rows (kept for an hour) and the lists you go back to (for 15 minutes) anew.
   The tags you love or like are your favourite tags: a filter, "With any of the tags I love
   or like" on Scenes (and saved searches, which use them as they are at each check), and the
   top of the Tags page. Wherever tags are listed, they show how you feel about them.

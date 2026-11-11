@@ -713,6 +713,34 @@ class TagFeelings(unittest.TestCase):
         app.set_favorite("performer", self.TAG, True)
         self.assertEqual(app.discover_cache, {})         # favourites: everyone's
 
+    def test_sommelier(self):
+        app, u = self.app, self.user
+        app.set_tag_feeling(u, self.TAG, "love")
+        app.rare = {self.TAG: 0.5}
+        app.discover_cache = {u["id"]: (1, {})}
+        out = app.set_multiplier(u, self.TAG, 9)                    # at most TUNE_MAX
+        self.assertEqual(out["tags"], [{"id": self.TAG, "name": "Tag 1", "feeling": "love", "multiplier": 4.0,
+                                        "rarity": 0.5, "base": 2.0, "points": 8.0}])
+        self.assertEqual(app.discover_cache, {})                    # Discover scores it anew
+        self.assertFalse(out["on"])
+        self.assertEqual(app.tuning(u), {})                         # off: kept, but doesn't count
+        u["sommelier"] = 1
+        self.assertEqual(app.tuning(u), {self.TAG: 4.0})
+        self.assertEqual(app.set_multiplier(u, self.TAG, 0)["tags"][0]["multiplier"], d.TUNE_MIN)
+        app.set_tag_feeling(u, self.TAG, "like")                    # a new feeling keeps it
+        self.assertEqual(app.tuning(u), {self.TAG: d.TUNE_MIN})
+        app.set_tag_feeling(u, self.TAG, "hate")                    # hated: never recommended anyway
+        self.assertEqual(app.tuning(u), {})
+        self.assertEqual(app.sommelier(u)["tags"], [])
+        app.set_tag_feeling(u, self.TAG, "dislike")
+        self.assertEqual(app.sommelier(u)["tags"][0]["base"], -5)  # however common
+        self.assertEqual(app.set_multiplier(u, None, 1)["tags"][0]["multiplier"], 1)  # all back to 1
+        self.assertEqual(app.tuning(u), {})
+        with self.assertRaises(d.ApiError):
+            app.set_multiplier(u, "bbbbbbbb-0000-0000-0000-000000000001", 2)  # no feeling for it
+        app.forget_taste(u)
+        self.assertIsNone(app.rare)                                 # read again from the counts
+
     def test_old_favourite_and_disliked_tags_move_over(self):
         path = self.app.db.path
         conn = self.app.db.conn
@@ -770,6 +798,11 @@ class Rarity(unittest.TestCase):
         # loved and here too 10 * 0.5, liked 2 * 3; neutral (not known) 1; disliked -5 as it is
         self.assertEqual(d.weigh_tags(["common", "rare", "x", "meh"], feel, {"common", "x"}, rare),
                          (11.0, 1.0, 5, False))
+        # Sommelier: after the rarity, any tag with a feeling (not a neutral one) by its multiplier
+        tune = {"common": 2.0, "meh": 0.5, "x": 3.0}
+        self.assertEqual(d.weigh_tags(["common", "rare", "x", "meh"], feel, {"common", "x"}, rare, tune),
+                         (16.0, 1.0, 2.5, False))
+
 
 
 class Images(unittest.TestCase):
@@ -878,6 +911,19 @@ class Http(unittest.TestCase):
         status, out = self.req("POST", "/api/tag-feelings", {"id": TAG, "feeling": "love"})
         self.assertEqual((status, out["tags"]), (200, [{"id": TAG, "name": "Tag 1", "feeling": "love"}]))
         self.assertEqual(self.req("GET", "/api/status")[1]["fav_tags"], [{"id": TAG, "name": "Tag 1"}])
+
+    def test_sommelier_over_http(self):
+        self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
+        self.req("POST", "/api/tag-feelings", {"id": TAG, "feeling": "love"})
+        self.assertEqual(self.req("GET", "/api/status")[1]["user"]["sommelier"], 0)
+        self.assertEqual(self.req("POST", "/api/prefs", {"sommelier": True})[0], 200)
+        self.assertEqual(self.req("GET", "/api/status")[1]["user"]["sommelier"], 1)
+        status, out = self.req("POST", "/api/sommelier", {"id": TAG, "multiplier": 1.5})
+        self.assertEqual((status, out["on"], out["tags"][0]["multiplier"]), (200, True, 1.5))
+        self.assertEqual(self.req("POST", "/api/sommelier", {"id": TAG, "multiplier": "lots"})[0], 400)
+        self.assertEqual(self.req("POST", "/api/sommelier", {"reset": True})[1]["tags"][0]["multiplier"], 1)
+        self.assertEqual(self.req("POST", "/api/taste-cache")[0], 200)
+        self.assertEqual(self.req("POST", "/api/prefs", {})[0], 400)
         self.req("POST", "/api/tag-feelings", {"id": TAG, "feeling": "hate"})
         status, out = self.req("GET", "/api/status")
         self.assertEqual((out["fav_tags"], out["tag_feelings"]), ([], [{"id": TAG, "name": "Tag 1", "feeling": "hate"}]))
@@ -1440,6 +1486,22 @@ class Taste(Base):
         self.assertEqual(app.sync_stash_favourites(), 2)
         self.assertEqual(synced, [("aaaaaaaa-2", True), ("aaaaaaaa-3", False)])
         self.assertEqual(app.sync_stash_favourites(), 0)                  # once
+
+    def test_browse_performers_filters(self):
+        app, seen = self.app, []
+        app.stash.query_performers = lambda inp: seen.append(inp) or {"count": 0, "performers": []}
+        app.browse_performers({"country": "HU", "ethnicity": "CAUCASIAN", "born_from": "1987", "born_to": "1989"})
+        self.assertEqual(seen[-1]["country"], {"value": "HU", "modifier": "EQUALS"})
+        self.assertEqual(seen[-1]["ethnicity"], "CAUCASIAN")
+        self.assertEqual(seen[-1]["birthdate"], {"value": "1986-12-31", "modifier": "GREATER_THAN"})
+        self.assertEqual(seen[-1]["birth_year"], {"value": 1990, "modifier": "LESS_THAN"})
+        app.browse_performers({"born_from": "1989", "born_to": "1987"})      # either way round
+        self.assertEqual((seen[-1]["birthdate"]["value"], seen[-1]["birth_year"]["value"]), ("1986-12-31", 1990))
+        app.browse_performers({"born_to": "1990"})                             # one end only
+        self.assertNotIn("birthdate", seen[-1])
+        self.assertEqual(seen[-1]["birth_year"]["value"], 1991)
+        app.browse_performers({"country": "Hungary", "ethnicity": "ELF", "born_from": "19x"})
+        self.assertFalse({"country", "ethnicity", "birthdate", "birth_year"} & set(seen[-1]))
 
     def test_hated_performer_never_recommended(self):
         app = self.app
