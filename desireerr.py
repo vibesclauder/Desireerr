@@ -39,7 +39,7 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.2"
+VERSION = "1.3"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
@@ -64,6 +64,8 @@ WATCH_PAGES = 5              # at most this many pages of 100 scenes per check
 WATCH_MAX_REQUESTS = 25      # requests one check makes at most; the rest wait for the next
 WATCH_RETRY_DAYS = 14        # how long a scene Whisparr doesn't know yet is tried again
 AVAILABLE_WINDOW = 2 * 86400  # "now available" only for files this new (not a backlog)
+STALLED_HOUR = 10            # local hour from which the day's one push about stalled requests goes
+STALLED_LISTED = 10          # that push names this many scenes at most
 JELLYFIN_MAX_AGE = 600       # seconds between Jellyfin library refreshes
 NFO_BATCH = 50               # .nfo files written per background round at most
 NFO_RETRY = 86400            # a scene StashDB didn't have is tried again after this long
@@ -80,6 +82,7 @@ FEELINGS = {"love": 2, "like": 1, "dislike": -1, "hate": -2}  # a user's for a t
 FEELING_SCORE = {2: (4, 10), 1: (2, 5), 0: (0, 1), -1: (-5, -5)}  # hate: never recommended
 SIMILAR_TTL = 3600
 DISCOVER_ROW = 20            # scenes in a Discover row
+DISCOVER_FETCH = 40          # asked of StashDB for a plain row: some may be of kinds the user hides
 DISCOVER_TTL = 3600          # Discover's StashDB rows are kept this long (Reload: anew)
 DISCOVER_POOL = 100          # "New with tags you love or like" picks from this many newest
 # A tag's rarity scales the points it adds (see rarity): one on this many of StashDB's scenes
@@ -112,6 +115,31 @@ HAIR_FAMILY = {"BLACK": "dark", "BRUNETTE": "dark", "AUBURN": "red", "RED": "red
 CUPS = {"AA": 0, "A": 1, "B": 2, "C": 3, "D": 4, "DD": 5, "E": 5, "DDD": 6, "F": 6, "FF": 7, "G": 7,
         "GG": 8, "H": 8, "HH": 9, "I": 9, "J": 10, "K": 11}
 COSTAR_BONUS = 5
+# What a user wants to see (Settings, at the top; asked at the first login): every scene is of
+# one kind (scene_kind), and an orientation shows some kinds, plus its extras if ticked. Until a
+# user picks one, everything shows. Scenes of no known kind always show.
+CONTENT_KINDS = ("straight", "lesbian", "gay", "bi", "trans", "solo_f", "solo_m")
+ORIENTATIONS = {
+    "straight_man": ("straight", "solo_f"),
+    "straight_woman": ("straight", "solo_m"),
+    "gay_man": ("gay", "solo_m"),
+    "lesbian": ("lesbian", "solo_f"),
+    "everything": CONTENT_KINDS,
+    "custom": (),                # the kinds ticked
+}
+ORIENTATION_EXTRAS = {"straight_man": ("lesbian",)}
+# A performer of these genders shows in performer lists if one of their kinds of scene does.
+GENDER_KINDS = {"FEMALE": {"straight", "lesbian", "bi", "solo_f"},
+                "MALE": {"straight", "gay", "bi", "solo_m"},
+                "TRANSGENDER_FEMALE": {"trans"}, "TRANSGENDER_MALE": {"trans"}}
+# A scene's kind comes from its performers' genders and these StashDB tags: the Orientation and
+# Group Makeup ones (see tag_kind), and acts that need a man, for POV scenes that credit only the
+# women. When tags tell several kinds, the first of KIND_ORDER counts.
+KIND_TAG_CATEGORIES = ("Orientation", "Group Makeup")
+MALE_ACT_TAGS = ("Blowjob", "Vaginal Sex", "Cumshot", "Creampie", "Handjob", "Facial", "Cum in Mouth",
+                 "Titjob", "Missionary", "Doggy Style", "Cowgirl", "Reverse Cowgirl")
+KIND_ORDER = ("trans", "gay", "bi", "straight", "lesbian", "solo_m", "solo_f")
+KIND_TAGS_TTL = 86400
 LOOKALIKE_PAGES = 3          # pages of 100 of the same country's (or ethnicity's) most popular
 COSTAR_PAGES = 2             # pages of 100 of their co-stars
 LOOKALIKE_TASTED = 30
@@ -327,6 +355,8 @@ COLUMNS = [
     ("watches", "follow", "TEXT NOT NULL DEFAULT ''"),      # "performer:<id>": a follow
     ("users", "performer_sort", "TEXT NOT NULL DEFAULT 'TASTE'"),  # a performer's scenes: TASTE, DATE
     ("users", "sommelier", "INTEGER NOT NULL DEFAULT 0"),   # the tags' multipliers count
+    ("users", "orientation", "TEXT NOT NULL DEFAULT ''"),   # ORIENTATIONS; empty: not picked yet
+    ("users", "content", "TEXT NOT NULL DEFAULT ''"),       # the CONTENT_KINDS shown, comma-separated
     ("tag_feelings", "multiplier", "REAL NOT NULL DEFAULT 1"),  # sommelier mode's, see TUNE_MIN
 ]
 
@@ -639,6 +669,24 @@ query ($input: TagQueryInput!) {
 }"""
         return self.query(q, {"input": tag_input}, ttl=3600)["queryTags"]
 
+    def kind_tags(self):
+        """Tag ID -> the kind of scene it tells (tag_kind), or "male" for MALE_ACT_TAGS."""
+        cats = {c["name"]: c["id"] for c in self.tag_categories()}
+        out = {}
+        for name in KIND_TAG_CATEGORIES:
+            page, seen = 1, 0
+            while name in cats:
+                got = self.query_tags({"category_id": cats[name], "per_page": 100, "page": page})
+                out.update({t["id"]: tag_kind(t["name"]) for t in got["tags"] if tag_kind(t["name"])})
+                seen += len(got["tags"])
+                if not got["tags"] or seen >= got["count"]:
+                    break
+                page += 1
+        body = "\n".join(f"a{n}: findTagOrAlias(name: {json.dumps(t)}) {{ id }}" for n, t in enumerate(MALE_ACT_TAGS))
+        data = self.query("query {\n" + body + "\n}", ttl=KIND_TAGS_TTL)
+        out.update({t["id"]: "male" for t in data.values() if t})
+        return out
+
     def tag_categories(self):
         q = "{ queryTagCategories { count tag_categories { id name group description } } }"
         return self.query(q, ttl=6 * 3600)["queryTagCategories"]["tag_categories"]
@@ -945,15 +993,42 @@ class Notifier:
             out["click"] = f"{base}/scene/{req['scene_id']}"
         return out
 
+    def stalled_payload(self, rows, s):
+        """One push for several requests that started waiting too long."""
+        n = len(rows)
+        title, quiet = NOTIFY_EVENTS["stalled"]
+        if s["notify_discreet"] == "1":
+            out = {"title": s["tab_title"] or "Desireerr",
+                   "message": quiet if n == 1 else f"{n} requests have no release yet."}
+        else:
+            lines = [" · ".join(x for x in (r.get("title") or "Untitled", r.get("studio")) if x)
+                     for r in rows[:STALLED_LISTED]]
+            if n > STALLED_LISTED:
+                lines.append(f"and {n - STALLED_LISTED} more")
+            days = min(r["stalled_days"] for r in rows)
+            lines += ["", f"No release found in {days} days or more."]
+            out = {"title": title if n == 1 else f"{n} Scene Requests Still Waiting",
+                   "message": "\n".join(lines)}
+        if self.app_url(s):
+            out["click"] = self.app_url(s) + "/requests?filter=stalled"
+        return out
+
     def send(self, event, req, extra=""):
         """Push in the background, if this event is switched on and there's a topic."""
         s = self.db.settings()
-        if event not in s["notify_events"].split(","):
-            return
+        if event in s["notify_events"].split(","):
+            self.push(s, self.payload(event, req, s, extra))
+
+    def send_stalled(self, rows):
+        s = self.db.settings()
+        if "stalled" in s["notify_events"].split(","):
+            self.push(s, self.stalled_payload(rows, s))
+
+    def push(self, s, payload):
         server, topic = self.target(s)
         if not topic:
             return
-        body = dict(self.payload(event, req, s, extra), topic=topic)
+        body = dict(payload, topic=topic)
         if self.background:
             threading.Thread(target=self.post, args=(server, body), daemon=True).start()
         else:
@@ -1373,6 +1448,46 @@ def lookalike(a, b):
     return 100 * matched / known * (0.6 + 0.4 * known / sum(LOOKALIKE.values()))
 
 
+def tag_kind(name):
+    """The kind of scene (CONTENT_KINDS) a StashDB Orientation or Group Makeup tag tells, if any."""
+    named = {"Straight": "straight", "Lesbian": "lesbian", "Gay": "gay", "Bisexual": "bi",
+             "Solo Female": "solo_f", "Solo Male": "solo_m", "Male Fucks Male": "gay"}
+    if name in named:
+        return named[name]
+    if name.startswith("Trans") or "(Trans" in name or name == "Solo Trans":
+        return "trans"
+    m = re.search(r"\((\w+)\)$", name)
+    word = m.group(1) if m else ""
+    if word in ("Gay", "Lesbian", "Straight", "Mixed"):
+        return {"Gay": "gay", "Lesbian": "lesbian"}.get(word, "straight")
+    if word and set(word) <= set("BGT"):        # Threesome (BGG) and the like
+        return "trans" if "T" in word else "straight" if {"B", "G"} <= set(word) else None
+    return None
+
+
+def scene_kind(genders, kinds, male_act=False):
+    """A scene's kind (CONTENT_KINDS) from its performers' GENDERS and the KINDS its tags tell;
+    MALE_ACT: a tag says a man takes part. None if it can't be told. Non-binary performers
+    don't count either way: they're in all kinds of scenes."""
+    women, men = genders.count("FEMALE"), genders.count("MALE")
+    if any((g or "").startswith("TRANSGENDER") for g in genders):
+        return "trans"
+    if kinds:
+        kind = min(kinds, key=KIND_ORDER.index)
+        if kind in ("lesbian", "solo_f") and men:
+            return "straight"
+        if kind in ("gay", "solo_m") and women:
+            return "bi" if kind == "gay" else "straight"
+        return kind
+    if women and men:
+        return "straight"
+    if men:
+        return "gay" if men > 1 else "solo_m"
+    if women:
+        return "straight" if male_act else "lesbian" if women > 1 else "solo_f"
+    return None
+
+
 def card_people(sc):
     return [p["performer"]["id"] for p in sc.get("performers") or [] if p.get("performer")]
 
@@ -1396,6 +1511,7 @@ class App:
         self.discover_cache = {}  # user id -> (when made, {row key: row}), see discover
         self.discover_lock = threading.Lock()
         self.rare = None         # tag id -> rarity, from tag_scenes (see count_tags)
+        self.kinds = (0, {})     # (when asked, tag id -> kind), see kind_tags
         self.nfo_error = ""
         self.failures = {}       # ip -> (count, last time), for login throttling
         self.setup_code = self.load_setup_code() if setup_code else ""
@@ -1438,7 +1554,8 @@ class App:
         if not token:
             return None
         return self.db.one(
-            "SELECT u.id, u.username, u.is_admin, u.auto_approve, u.performer_sort, u.sommelier FROM sessions s "
+            "SELECT u.id, u.username, u.is_admin, u.auto_approve, u.performer_sort, u.sommelier, u.orientation, "
+            "u.content FROM sessions s "
             "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires > ?",
             (hashlib.sha256(token.encode()).hexdigest(), now()))
 
@@ -1494,11 +1611,66 @@ class App:
             "FROM users u ORDER BY u.username")
 
     # -- status -------------------------------------------------------------------------
-    def annotate(self, scenes, user=None):
+    # -- what a user wants to see ---------------------------------------------------------
+    def shown_kinds(self, user):
+        """The kinds of scene USER wants to see; None: all of them (or not picked yet)."""
+        if not user:
+            return None
+        if "content" not in user:
+            user = self.db.one("SELECT orientation, content FROM users WHERE id = ?", (user["id"],)) or {}
+        if not user.get("orientation"):
+            return None
+        kinds = set(filter(None, user["content"].split(",")))
+        return None if kinds >= set(CONTENT_KINDS) else kinds
+
+    def set_content(self, user, orientation, kinds=()):
+        """What USER wants to see: an ORIENTATIONS preset with the extras ticked in KINDS, or
+        "custom" and the KINDS ticked."""
+        if orientation not in ORIENTATIONS:
+            raise ApiError(400, "Pick an orientation, or Custom.")
+        ticked = {k for k in kinds if k in CONTENT_KINDS}
+        if orientation == "custom":
+            shown = ticked
+        else:
+            shown = set(ORIENTATIONS[orientation]) | (ticked & set(ORIENTATION_EXTRAS.get(orientation, ())))
+        if not shown:
+            raise ApiError(400, "Tick at least one kind of scene.")
+        content = ",".join(k for k in CONTENT_KINDS if k in shown)
+        self.db.run("UPDATE users SET orientation = ?, content = ? WHERE id = ?", (orientation, content, user["id"]))
+        self.forget_discover(user)
+        return {"orientation": orientation, "content": content}
+
+    def kind_of(self, scene):
+        """A scene card's kind (see scene_kind); its tags' kinds come from StashDB once a day."""
+        made, tags = self.kinds
+        if time.time() - made > KIND_TAGS_TTL:
+            try:
+                tags = self.stash.kind_tags()
+                self.kinds = (time.time(), tags)
+            except ApiError as e:   # the performers alone, and StashDB asked again in an hour
+                print(f"kinds of scene: {e.message}", file=sys.stderr, flush=True)
+                self.kinds = (time.time() - KIND_TAGS_TTL + 3600, tags)
+        found = {tags.get(t["id"]) for t in scene.get("tags") or []} - {None}
+        genders = [p["performer"].get("gender") for p in scene.get("performers") or [] if p.get("performer")]
+        return scene_kind(genders, found - {"male"}, "male" in found)
+
+    def shown(self, scenes, user):
+        """SCENES without the kinds USER hides."""
+        kinds = self.shown_kinds(user)
+        if kinds is None:
+            return list(scenes)
+        return [sc for sc in scenes if sc and self.kind_of(sc) in kinds | {None}]
+
+    def shows_gender(self, gender, kinds):
+        """Whether a performer of GENDER shows to a user who sees KINDS (see shown_kinds)."""
+        return kinds is None or gender not in GENDER_KINDS or bool(GENDER_KINDS[gender] & kinds)
+
+    def annotate(self, scenes, user=None, everything=False):
         """Copies of SCENES with their request state, from Whisparr and our own requests, and
         with a USER who has tag or performer feelings, their "taste" (see taste; "hated" if
-        None). Without their tags: the page doesn't need them."""
-        scenes = [dict(s) for s in scenes if s]
+        None). Without their tags: the page doesn't need them. Without the kinds of scene the
+        user hides, unless EVERYTHING."""
+        scenes = [dict(s) for s in (scenes if everything else self.shown(scenes, user)) if s]
         if not scenes:
             return scenes
         feel, perf = self.feelings(user), self.performer_taste(user)
@@ -1684,27 +1856,35 @@ class App:
         return {"count": total, "requests": [self.decorate(r) for r in rows]}
 
     def check_requests(self):
-        """Push once when an approved request's scene arrives, or when it has waited too
-        long for a release. Files older than AVAILABLE_WINDOW (say, from before the update
-        that brought pushes) are only marked."""
+        """Push once when an approved request's scene arrives, and once a day about the
+        requests that started waiting too long for a release. Files older than
+        AVAILABLE_WINDOW (say, from before the update that brought pushes) are only marked."""
+        stalled = []
         for row in self.db.all(self.REQUEST_SQL + " WHERE r.status = 'approved'"):
             notified = set(filter(None, row["notified"].split(",")))
             self.decorate(row)
-            event = extra = None
             if row["state"]["status"] == "available" and "available" not in notified:
+                notified.add("available")
+                self.db.run("UPDATE requests SET notified = ? WHERE id = ?",
+                            (",".join(sorted(notified)), row["id"]))
                 info = self.whisparr.lookup(row["scene_id"]) or {}
                 if now() - iso_time(info.get("file_added")) < AVAILABLE_WINDOW:
-                    event = "available"
-                notified.add("available")
+                    self.notify.send("available", row)
             elif row["stalled_days"] and "stalled" not in notified:
-                event, extra = "stalled", f"No release found in {row['stalled_days']} days."
-                notified.add("stalled")
-            else:
-                continue
-            self.db.run("UPDATE requests SET notified = ? WHERE id = ?",
-                        (",".join(sorted(notified)), row["id"]))
-            if event:
-                self.notify.send(event, row, extra)
+                stalled.append(row)
+        self.push_stalled(stalled)
+
+    def push_stalled(self, rows):
+        """The day's one push about newly stalled requests, from STALLED_HOUR; the ones
+        that stall later wait for the next day's."""
+        t = datetime.now()
+        if not rows or t.hour < STALLED_HOUR or self.db.setting("stalled_pushed") == t.date().isoformat():
+            return
+        for r in rows:
+            notified = sorted(set(filter(None, r["notified"].split(","))) | {"stalled"})
+            self.db.run("UPDATE requests SET notified = ? WHERE id = ?", (",".join(notified), r["id"]))
+        self.db.set_settings({"stalled_pushed": t.date().isoformat()})
+        self.notify.send_stalled(rows)
 
     def pending_count(self):
         return self.db.one("SELECT COUNT(*) AS n FROM requests WHERE status = 'pending'")["n"]
@@ -1958,7 +2138,7 @@ class App:
         ttl = 0 if fresh else 300
         specs = [
             ("trending", "Trending", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": DISCOVER_ROW, "sort": "TRENDING", "direction": "DESC"}, ttl)["scenes"],
+                {"page": 1, "per_page": DISCOVER_FETCH, "sort": "TRENDING", "direction": "DESC"}, ttl)["scenes"],
              "/scenes?sort=TRENDING"),
             ("favorites", "New scenes with favourite performers", lambda: self.new_with_favourites(user, ttl),
              None),
@@ -1967,11 +2147,11 @@ class App:
             ("performers", "Performers you might like", lambda: self.might_like(user, ttl), None),
             ("added", "Recently added", self.recent_library, None),
             ("new", "New releases", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": DISCOVER_ROW, "sort": "DATE", "direction": "DESC",
+                {"page": 1, "per_page": DISCOVER_FETCH, "sort": "DATE", "direction": "DESC",
                  "date": {"value": tomorrow(), "modifier": "LESS_THAN"}}, ttl)["scenes"],
              "/scenes?sort=DATE"),
             ("popular", "Popular", lambda: self.stash.query_scenes(
-                {"page": 1, "per_page": DISCOVER_ROW, "sort": "POPULARITY", "direction": "DESC"}, ttl)["scenes"],
+                {"page": 1, "per_page": DISCOVER_FETCH, "sort": "POPULARITY", "direction": "DESC"}, ttl)["scenes"],
              "/scenes?sort=POPULARITY"),
         ]
         with self.discover_lock:
@@ -1998,7 +2178,8 @@ class App:
         with self.discover_lock:
             self.discover_cache[user["id"]] = (made, {**kept, **keep})
         rows.update(kept)
-        out = [dict(rows[key], scenes=self.annotate(rows[key]["scenes"], user)) if key != "performers"
+        out = [dict(rows[key], scenes=self.annotate(rows[key]["scenes"], user, key == "added")[:DISCOVER_ROW])
+               if key != "performers"
                else dict(rows[key], performers=rows[key]["scenes"], scenes=[])
                for key, *_ in specs]
         mine = self.db.all("SELECT * FROM requests WHERE user_id = ? ORDER BY id DESC LIMIT 12",
@@ -2048,7 +2229,7 @@ class App:
         StashDB can't say their tags, as they are."""
         feel, perf = self.feelings(user), self.performer_taste(user)
         hated = {p for p, (points, _) in perf.items() if points is None}
-        scenes = [sc for sc in scenes if not hated & set(card_people(sc))]
+        scenes = [sc for sc in self.shown(scenes, user) if not hated & set(card_people(sc))]
         if not feel:
             return scenes
         tags = self.card_tags(scenes)
@@ -2078,6 +2259,7 @@ class App:
         if scene["request"]:
             scene["state"] = scene["request"]["state"]
         scene["stashdb_url"] = f"{STASHDB_WEB}/scenes/{scene_id}"
+        scene["hidden"] = not self.shown([scene], user)
         feel, perf = self.feelings(user), self.performer_taste(user)
         if feel or perf:
             scene = dict(scene)  # StashDB's answer is cached
@@ -2353,10 +2535,10 @@ class App:
             return (row["name"], self.lookalikes(seed, ttl or 3600)) if seed else (row["name"], {})
         with ThreadPoolExecutor(len(rows)) as pool:
             found = list(pool.map(around, rows))
-        scored = {}
+        scored, kinds = {}, self.shown_kinds(user)
         for name, alike in found:
             for pid, (score, prof) in alike.items():
-                if pid not in known and score > scored.get(pid, (-1,))[0]:
+                if pid not in known and score > scored.get(pid, (-1,))[0] and self.shows_gender(prof.get("gender"), kinds):
                     scored[pid] = (score, prof, {"like": name})
         return self.ranked_performers(scored, user, MIGHT_LIKE_TASTE_WEIGHT, DISCOVER_ROW, ttl or 3600,
                                       tasted=LOOKALIKE_TASTED * 2, each=MIGHT_LIKE_EACH)
@@ -2423,6 +2605,7 @@ class App:
         perf["follow"] = self.follow_state(user, "performer", pid)
         names = {v: k for k, v in FEELINGS.items()}
         perf["feeling"] = names.get(self.performer_feelings(user).get(pid), "neutral") if user else "neutral"
+        perf["hidden"] = not self.shows_gender(perf.get("gender"), self.shown_kinds(user))
         return perf
 
     def performer_feelings(self, user, named=False):
@@ -2631,7 +2814,9 @@ class App:
         if not term:
             return {"scenes": [], "performers": [], "studios": [], "tags": []}
         found = self.stash.search(term)
-        return dict(found, scenes=self.annotate(found["scenes"], user))
+        kinds = self.shown_kinds(user)
+        return dict(found, scenes=self.annotate(found["scenes"], user),
+                    performers=[p for p in found["performers"] if self.shows_gender(p.get("gender"), kinds)])
 
     def set_favorite(self, kind, sid, favorite):
         """Favourite (or not) on StashDB only: a filter for Discover, Scenes and the lists.
@@ -2759,8 +2944,9 @@ class App:
         return found
 
     def watch_requests(self, w):
-        """Request the noted scenes not wanted or asked for yet."""
-        owner = self.db.one("SELECT id, username, is_admin, auto_approve FROM users WHERE id = ?",
+        """Request the noted scenes not wanted or asked for yet, of the kinds the owner wants
+        to see (the others wait, should the owner change their mind)."""
+        owner = self.db.one("SELECT id, username, is_admin, auto_approve, orientation, content FROM users WHERE id = ?",
                             (w["user_id"],))
         approve = bool(owner["is_admin"] or owner["auto_approve"]) and not w["ask_first"]
         todo = self.db.all("SELECT * FROM watch_scenes WHERE watch_id = ? AND done = 0 ORDER BY seen",
@@ -2777,11 +2963,14 @@ class App:
             if asked or self.state(row["scene_id"])["status"] != "none":
                 mark(row, 1)
                 continue
+            card = json.loads(row["card"])
+            if not self.shown([card], owner):
+                continue
             if requested >= WATCH_MAX_REQUESTS:
                 waiting += 1
                 continue
             try:
-                self.create_request(owner, json.loads(row["card"]), approve=approve, watch=w)
+                self.create_request(owner, card, approve=approve, watch=w)
             except NotInWhisparr:
                 if now() - row["seen"] > WATCH_RETRY_DAYS * 86400:
                     mark(row, 2)
@@ -3300,8 +3489,11 @@ class Handler(BaseHTTPRequestHandler):
             return 200, app.set_performer_feeling(user, pid, feeling), None
         if key == ("POST", "prefs"):
             body = self.body_json()
-            if "performer_sort" not in body and "sommelier" not in body:
+            if not {"performer_sort", "sommelier", "orientation"} & set(body):
                 raise ApiError(400, "Which preference?")
+            if "orientation" in body:
+                kinds = body.get("kinds") if isinstance(body.get("kinds"), list) else []
+                app.set_content(user, body["orientation"], [str(k) for k in kinds])
             if "performer_sort" in body:
                 if body["performer_sort"] not in ("TASTE", "DATE"):
                     raise ApiError(400, "Sort a performer's scenes by TASTE or DATE.")

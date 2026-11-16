@@ -63,6 +63,11 @@ class FakeStash:
     def find_tag(self, tid):
         return {"id": tid, "name": f"Tag {tid[-1]}"} if tid.startswith("aaaaaaaa") else None
 
+    kinds = {}                # tag id -> the kind of scene it tells (see StashDB.kind_tags)
+
+    def kind_tags(self):
+        return self.kinds
+
     favourites = []           # StashDB's favourite performers
 
     def query_performers(self, inp):
@@ -1079,6 +1084,12 @@ class Stalled(Base):
         self.app.db.set_settings({"notify_discreet": "0", "stall_days": "7"})
         self.rid = self.app.request_scene(self.admin, SCENE)["id"]
         self.age(8)
+        hour = unittest.mock.patch.object(d, "STALLED_HOUR", 0)    # any time of day will do
+        hour.start()
+        self.addCleanup(hour.stop)
+
+    def next_day(self):
+        self.app.db.set_settings({"stalled_pushed": "2000-01-01"})
 
     def age(self, days):
         self.app.db.run("UPDATE requests SET created = ?, decided_at = ?", (d.now() - days * 86400,) * 2)
@@ -1094,16 +1105,52 @@ class Stalled(Base):
 
     def test_pushed_once_then_again_after_a_new_search(self):
         self.app.check_requests()
+        self.next_day()
         self.app.check_requests()
         self.assertEqual(self.events(), ["Scene Request Still Waiting"])
-        self.assertIn("No release found in 8 days.", self.app.pushes[0][1]["message"])
+        self.assertEqual(self.app.pushes[0][1]["message"], "A scene · Studio\n\nNo release found in 8 days or more.")
         self.app.search_again([self.app.request_row(self.rid)])
         self.assertEqual(self.commands[-1], {"name": "MoviesSearch", "movieIds": [41]})
         row = self.app.request_row(self.rid)
         self.assertEqual((row["stalled_days"], row["notified"]), (0, ""))
         self.app.db.run("UPDATE requests SET searched_at = ?", (d.now() - 8 * 86400,))
+        self.next_day()
         self.app.check_requests()
         self.assertEqual(len(self.app.pushes), 2)
+
+    def test_one_push_a_day(self):
+        self.app.check_requests()
+        self.app.request_scene(self.admin, OTHER)
+        self.app.db.run("UPDATE requests SET created = ?, decided_at = ? WHERE scene_id = ?",
+                        (d.now() - 9 * 86400,) * 2 + (OTHER,))
+        self.app.check_requests()                         # stalled the same day: tomorrow
+        self.assertEqual(len(self.app.pushes), 1)
+        self.next_day()
+        self.app.check_requests()
+        self.assertEqual(self.events(), ["Scene Request Still Waiting"] * 2)
+        self.assertIn("9 days or more", self.app.pushes[1][1]["message"])
+
+    def test_names_them_all_in_one(self):
+        self.app.request_scene(self.admin, OTHER)
+        self.age(9)
+        self.app.check_requests()
+        (_, body), = self.app.pushes
+        self.assertEqual(body["title"], "2 Scene Requests Still Waiting")
+        self.assertEqual(body["message"], "A scene · Studio\nA scene · Studio\n\nNo release found in 9 days or more.")
+
+    def test_not_before_the_hour(self):
+        with unittest.mock.patch.object(d, "STALLED_HOUR", 24):
+            self.app.check_requests()
+        self.assertEqual((self.app.pushes, self.app.request_row(self.rid)["notified"]), ([], ""))
+
+    def test_discreet_summary(self):
+        self.app.db.set_settings({"notify_discreet": "1", "app_url": "http://box:5056"})
+        self.app.request_scene(self.admin, OTHER)
+        self.age(9)
+        self.app.check_requests()
+        self.assertEqual(self.app.pushes[0][1], {"topic": "topic", "title": "Desireerr",
+                                                 "message": "2 requests have no release yet.",
+                                                 "click": "http://box:5056/requests?filter=stalled"})
 
     def test_stalled_tab(self):
         self.app.request_scene(self.admin, OTHER)            # new: not stalled
@@ -1240,6 +1287,107 @@ TAG2 = "aaaaaaaa-0000-0000-0000-000000000002"
 
 def card(sid, updated):
     return dict(scene(sid), updated=updated)
+
+
+def cast(sid, *genders, tags=()):
+    """A scene card with performers of these genders and these tag IDs."""
+    return dict(scene(sid), performers=[{"performer": {"id": f"p{i}", "name": f"P{i}", "gender": g}}
+                                        for i, g in enumerate(genders)],
+                tags=[{"id": t} for t in tags])
+
+
+class SceneKinds(unittest.TestCase):
+    def test_from_tags(self):
+        self.assertEqual([d.tag_kind(n) for n in ("Straight", "Lesbian", "Gay", "Bisexual", "Transgender (Female)",
+                                                   "Twosome (Straight)", "Orgy (Mixed)", "Threesome (BGG)",
+                                                   "Foursome (BBGT)", "Trans Fucks Female", "Fivesome (Gay)",
+                                                   "Solo Female", "Solo Male", "Threesome", "Gangbang")],
+                         ["straight", "lesbian", "gay", "bi", "trans", "straight", "straight", "straight",
+                          "trans", "trans", "gay", "solo_f", "solo_m", None, None])
+
+    def test_from_performers(self):
+        kind = d.scene_kind
+        self.assertEqual(kind(["FEMALE", "MALE"], set()), "straight")
+        self.assertEqual(kind(["FEMALE", "FEMALE"], set()), "lesbian")
+        self.assertEqual(kind(["FEMALE"], set()), "solo_f")
+        self.assertEqual(kind(["FEMALE"], set(), male_act=True), "straight")    # POV: the man isn't credited
+        self.assertEqual(kind(["MALE", "MALE"], set()), "gay")
+        self.assertEqual(kind(["MALE"], set()), "solo_m")
+        self.assertEqual(kind(["MALE", "TRANSGENDER_FEMALE"], set()), "trans")
+        self.assertEqual(kind(["MALE", "NON_BINARY"], set()), "solo_m")          # non-binary: no kind
+        self.assertIsNone(kind([], set()))
+
+    def test_tags_first(self):
+        kind = d.scene_kind
+        self.assertEqual(kind(["FEMALE", "FEMALE"], {"straight"}), "straight")
+        self.assertEqual(kind(["FEMALE", "FEMALE", "MALE"], {"lesbian"}), "straight")  # a man takes part
+        self.assertEqual(kind(["FEMALE", "MALE", "MALE"], {"gay"}), "bi")
+        self.assertEqual(kind(["FEMALE", "MALE"], {"straight", "trans"}), "trans")
+
+
+class Content(Base):
+    def setUp(self):
+        super().setUp()
+        self.app.stash.kinds = {"t-straight": "straight", "t-blowjob": "male"}
+        self.app.stash.listed = [
+            cast("s-straight", "FEMALE", "MALE"),
+            cast("s-pov", "FEMALE", tags=["t-blowjob"]),
+            cast("s-lesbian", "FEMALE", "FEMALE"),
+            cast("s-tagged", "FEMALE", "FEMALE", tags=["t-straight"]),
+            cast("s-gay", "MALE", "MALE"),
+            cast("s-trans", "TRANSGENDER_FEMALE", "MALE"),
+            cast("s-solo", "FEMALE"),
+            cast("s-unknown"),
+        ]
+
+    def browse(self):
+        self.admin = self.app.db.one("SELECT * FROM users WHERE id = ?", (self.admin["id"],))
+        return [sc["id"] for sc in self.app.browse_scenes({"sort": "DATE"}, self.admin)["scenes"]]
+
+    def test_everything_until_picked(self):
+        self.assertEqual(len(self.browse()), 8)
+
+    def test_straight_man(self):
+        self.app.set_content(self.admin, "straight_man", ["gay"])            # not an extra of it
+        self.assertEqual(self.browse(), ["s-straight", "s-pov", "s-tagged", "s-solo", "s-unknown"])
+        self.app.set_content(self.admin, "straight_man", ["lesbian"])
+        self.assertIn("s-lesbian", self.browse())
+
+    def test_gay_man_and_custom(self):
+        self.app.set_content(self.admin, "gay_man")
+        self.assertEqual(self.browse(), ["s-gay", "s-unknown"])
+        self.app.set_content(self.admin, "custom", ["trans", "nonsense"])
+        self.assertEqual(self.browse(), ["s-trans", "s-unknown"])
+        self.assertEqual(self.app.db.one("SELECT content FROM users WHERE id = ?", (self.admin["id"],))["content"], "trans")
+
+    def test_everything_hides_nothing(self):
+        self.app.set_content(self.admin, "everything")
+        self.assertIsNone(self.app.shown_kinds(self.admin))
+        self.assertEqual(len(self.browse()), 8)
+
+    def test_bad_choices(self):
+        for orientation, kinds in (("pirate", []), ("custom", []), ("custom", ["nonsense"])):
+            with self.assertRaises(d.ApiError):
+                self.app.set_content(self.admin, orientation, kinds)
+
+    def test_performers_of_hidden_kinds_only(self):
+        self.app.set_content(self.admin, "straight_man")
+        kinds = self.app.shown_kinds(self.admin)
+        self.assertEqual([g for g in ("FEMALE", "MALE", "TRANSGENDER_FEMALE", "NON_BINARY", None)
+                          if self.app.shows_gender(g, kinds)], ["FEMALE", "MALE", "NON_BINARY", None])
+        self.app.set_content(self.admin, "gay_man")
+        self.assertFalse(self.app.shows_gender("FEMALE", self.app.shown_kinds(self.admin)))
+
+    def test_saved_search_skips_hidden_kinds(self):
+        self.app.set_content(self.admin, "gay_man")
+        self.app.stash.listed = [dict(cast(SCENE, "FEMALE", "MALE"), updated="2026-11-07T10:00:00Z"),
+                                 dict(cast(OTHER, "MALE", "MALE"), updated="2026-11-06T10:00:00Z")]
+        w = self.app.save_watch(self.admin, {"name": "Mine", "query": f"tags={TAG}", "since": "2026-11-01"})
+        self.app.check_watch(w["id"])
+        self.assertEqual([r["scene_id"] for r in self.app.db.all("SELECT * FROM requests")], [OTHER])
+        self.app.set_content(self.admin, "everything")                      # the skipped one is still noted
+        self.app.check_watch(w["id"])
+        self.assertEqual(len(self.app.db.all("SELECT * FROM requests")), 2)
 
 
 class JellyfinLinks(Base):

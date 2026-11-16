@@ -297,6 +297,9 @@ textarea.input { height: auto; padding: 10px 12px; }
 .suggest small { color: var(--muted); }
 .check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--fg-2); cursor: pointer; user-select: none; }
 .check input { accent-color: var(--accent); width: 16px; height: 16px; }
+.content-form { display: grid; gap: 10px; }
+.content-choice { display: grid; gap: 6px; }
+.content-extra { display: flex; flex-wrap: wrap; gap: 6px 16px; padding-left: 24px; }
 .load-more { display: grid; place-items: center; padding: 10px; }
 .spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--surface-3); border-top-color: var(--accent-hi); animation: spin .8s linear infinite; }
 @keyframes spin { to { rotate: 360deg; } }

@@ -450,6 +450,10 @@ async function render() {
   if (path === "/setup") return viewSetup();
 
   const view = shell();
+  if (!me.orientation) {
+    $$("[data-nav]").forEach((a) => a.classList.remove("on"));
+    return viewContentFirst(view);
+  }
   let match = null;
   for (const [re, fn, key] of ROUTES) {
     const m = path.match(re);
@@ -1257,6 +1261,7 @@ async function viewScene(view, id, ctx) {
           ${tasteLine(s)}
           <div class="facts">${[fmtDate(s.release_date), fmtDur(s.duration), s.code].filter(Boolean).map((x) => html`<span>${x}</span>`)}</div>
           <div>${statePill(s.state)}</div>
+          ${s.hidden ? html`<div class="note">Elsewhere this kind of scene is hidden (Settings, What you want to see).</div>` : ""}
           ${s.state.status === "downloading" ? html`<div class="dl-bar"><i style="width:${s.state.progress || 0}%"></i></div><div class="note">${s.state.timeleft ? `About ${s.state.timeleft} left` : ""}</div>` : ""}
           ${s.state.status === "processing" ? html`<div class="note ${s.request?.stalled_days ? "warn-text" : ""}">${s.request?.stalled_days ? stalledNote(s.request) : ""} Whisparr wants this scene and grabs it when a release shows up.</div>` : ""}
           ${s.state.status === "failed" && s.request?.error ? html`<div class="note bad-text">${s.request.error}</div>` : ""}
@@ -1369,6 +1374,7 @@ async function viewPerformer(view, id, ctx) {
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
           <div class="btns">${followButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
           <div>${performerFeelings(p)}</div>
+          ${p.hidden ? html`<div class="note">Elsewhere performers like this are hidden (Settings, What you want to see).</div>` : ""}
         </div>
       </div>
     </section>
@@ -1569,7 +1575,7 @@ async function viewPerformers(view, ctx) {
     <div class="section" id="list"></div></div>`.s;
   await listBrowser($("#list", view), ctx, {
     endpoint: "performers", key: "performers", card: personCard, gridClass: "people",
-    defaults: { q: "", sort: "POPULARITY", gender: "FEMALE", country: "", ethnicity: "", born_from: "", born_to: "", favorites: "" },
+    defaults: { q: "", sort: "POPULARITY", gender: ORIENTATION_GENDER[me.orientation] || "ANY", country: "", ethnicity: "", born_from: "", born_to: "", favorites: "" },
     controls: (f) => html`
       <label class="field grow"><span>Name</span><input class="input" type="search" name="q" value="${f.q}" placeholder="Name or alias"></label>
       <label class="field"><span>Sort</span><select class="input" name="sort">${[["POPULARITY", "Most popular"], ["SCENE_COUNT", "Most scenes"], ["LAST_SCENE", "Latest scene"], ["DEBUT", "Newest debut"], ["CREATED_AT", "Newly added to StashDB"], ["BIRTHDATE", "Youngest"], ["NAME", "Name"]].map(([v, l]) => option(v, l, f.sort))}</select></label>
@@ -1708,8 +1714,64 @@ const NOTIFY_EVENTS = [
   ["declined", "An admin declines a request"],
   ["available", "A requested scene is downloaded"],
   ["failed", "A request fails"],
-  ["stalled", "A request finds no release for too long (set under Whisparr)"],
+  ["stalled", "Requests find no release for too long (one push a day; days set under Whisparr)"],
 ];
+
+// ---------------------------------------------------------------------------------------
+// What you want to see: an orientation (with its extras), or Custom and the kinds ticked.
+// The server hides the other kinds everywhere; until a user picks, they're asked first.
+// ---------------------------------------------------------------------------------------
+
+const ORIENTATIONS = [
+  ["straight_man", "Straight man", "Men with women, and solo women", [["lesbian", "Lesbian scenes too"]]],
+  ["straight_woman", "Straight woman", "Men with women, and solo men"],
+  ["gay_man", "Gay man", "Men with men, and solo men"],
+  ["lesbian", "Lesbian", "Women with women, and solo women"],
+  ["everything", "Everything", "Nothing hidden"],
+  ["custom", "Custom", "The kinds you tick", [["straight", "Straight"], ["lesbian", "Lesbian"], ["gay", "Gay"], ["bi", "Bisexual"], ["trans", "Trans"], ["solo_f", "Solo women"], ["solo_m", "Solo men"]]],
+];
+const ORIENTATION_GENDER = { straight_man: "FEMALE", lesbian: "FEMALE", straight_woman: "MALE", gay_man: "MALE" };
+
+function contentForm() {
+  const pick = me.orientation || "";
+  const shown = new Set((me.content || "").split(",").filter(Boolean));
+  return html`<form class="content-form" id="content-form">
+    ${ORIENTATIONS.map(([v, label, sub, extras = []]) => html`<div class="content-choice">
+      <label class="check"><input type="radio" name="orientation" value="${v}" ${v === pick ? "checked" : ""} required><span><b>${label}</b> <span class="note">${sub}</span></span></label>
+      ${extras.length ? html`<div class="content-extra" data-for="${v}" ${v === pick ? "" : "hidden"}>${extras.map(([k, l]) => html`<label class="check"><input type="checkbox" value="${k}" ${v === pick && shown.has(k) ? "checked" : ""}> ${l}</label>`)}</div>` : ""}
+    </div>`)}
+    <div class="btns"><button class="btn primary">Save</button></div>
+  </form>`;
+}
+
+function wireContentForm(view, done) {
+  const form = $("#content-form", view);
+  form.onchange = (e) => {
+    if (e.target.name === "orientation") $$("[data-for]", form).forEach((el) => { el.hidden = el.dataset.for !== e.target.value; });
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const orientation = form.orientation.value;
+    const kinds = $$(`[data-for="${orientation}"] input:checked`, form).map((x) => x.value);
+    const btn = $("button.primary", form);
+    btn.classList.add("busy");
+    try {
+      await api("prefs", { method: "POST", body: { orientation, kinds } });
+      await refreshStatus();
+      listMemory.clear();
+      done();
+    } catch (err) { toast(err.message, true); } finally { btn.classList.remove("busy"); }
+  };
+}
+
+function viewContentFirst(view) {
+  view.innerHTML = html`<div class="page"><div class="page-title"><h1>What do you want to see?</h1></div>
+    <section class="panel">
+      <p class="lede">Other kinds of scene are hidden everywhere: Discover, Scenes, Search, and what your saved searches request. You can change this at the top of Settings.</p>
+      ${contentForm()}
+    </section></div>`.s;
+  wireContentForm(view, () => { toast("Saved."); render(); });
+}
 
 // ---------------------------------------------------------------------------------------
 // Sommelier: in sommelier mode, a multiplier for each tag the user loves, likes or dislikes
@@ -1847,6 +1909,11 @@ async function viewSettings(view, ctx) {
     <label class="check"><input type="checkbox" id="pf-somm" ${me.sommelier ? "checked" : ""}> Sommelier mode: fine-tune how much each tag you love, like or dislike counts, on a page of its own</label>
     <a class="btn ghost" href="/sommelier" id="pf-somm-open" style="justify-self:start" ${me.sommelier ? "" : "hidden"}>${icon("wine")}Open Sommelier</a>
   </section>`;
+  const content = html`<section class="panel">
+    <h2>What you want to see</h2>
+    <p class="lede">Other kinds of scene are hidden everywhere: Discover, Scenes, Search, a studio's, tag's or performer's scenes, and what your saved searches request. A scene's kind comes from its performers' genders and StashDB's orientation and group tags; one that can't be told shows.</p>
+    ${contentForm()}
+  </section>`;
   const privacy = html`<section class="panel">
     <h2>On this device</h2>
     <label class="check"><input type="checkbox" id="pv-covers" ${document.body.classList.contains("hide-covers") ? "checked" : ""}> Blur covers until I point at them (the eye button in the top bar does the same)</label>
@@ -1930,7 +1997,8 @@ async function viewSettings(view, ctx) {
       </form>
     </section>`);
   }
-  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>${parts}${account}${taste}${privacy}</div>`.s;
+  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>${content}${parts}${account}${taste}${privacy}</div>`.s;
+  wireContentForm(view, () => toast("Saved. Pages show what you picked from now on."));
 
   const formData = (form) => Object.fromEntries(new FormData(form).entries());
   const submit = (id, fn) => {

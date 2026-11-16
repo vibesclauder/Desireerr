@@ -46,6 +46,16 @@ or available.
 
   A scene with a disliked tag is never in the first reel, and in Discover only if the tags
   you love and like outweigh its disliked ones.
+- **What you want to see.** Each user picks an orientation (asked at the first login, changed
+  at the top of Settings): straight man (lesbian scenes too, if ticked), straight woman, gay
+  man, lesbian, everything, or a custom set of straight, lesbian, gay, bisexual, trans, solo
+  women and solo men. Other kinds of scene are hidden everywhere, saved searches don't request
+  them, and the Performers page starts with the gender you'd look for. StashDB can't filter
+  scenes by gender, and only about one in seven has an orientation tag, so Desireerr tells a
+  scene's kind itself: StashDB's Orientation and Group Makeup tags first (Straight, Twosome
+  (Lesbian), Threesome (BGG)...), else the performers' genders. A scene that credits only
+  women but has a tag like Blowjob or Cumshot counts as straight (POV scenes rarely credit
+  the man); one that can't be told always shows.
 - **Find performers** by name, gender, country, ethnicity and the years they were born in
   (1987 to 1989, say), most popular, youngest or newest first. That's all of StashDB's
   performer filters that work: it takes hair, eyes, breasts, cup, height, career and tattoos
@@ -188,7 +198,8 @@ On a phone, open it and "Add to home screen" for an app icon.
   a release that turns up in its RSS feed. A request still waiting after 7 days (Settings,
   Whisparr) is *stalled*: it's on the Requests page's Stalled tab, where the requester or an
   admin can **search again** (one or all) or **give up** (Whisparr stops wanting it; it can
-  be requested again later).
+  be requested again later). Stalled requests come in one push a day (from 10:00), naming
+  the ones that stalled since the last.
 
 ## Saved searches
 
