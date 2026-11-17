@@ -257,6 +257,9 @@ button.chip { cursor: pointer; }
 .filters { display: grid; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 .filter-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .filters > summary { justify-self: start; list-style: none; }
+.browse-head { flex-wrap: wrap; }
+.sort-pick { order: -1; display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+.sort-pick .input { height: 34px; }
 .filters > summary::-webkit-details-marker { display: none; }
 .filters:not([open]) { background: none; border-color: transparent; padding: 0; }
 .fcount { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--accent); color: #fff; font-size: 12px; display: inline-grid; place-items: center; font-variant-numeric: tabular-nums; }
