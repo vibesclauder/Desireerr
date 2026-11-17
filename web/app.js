@@ -88,12 +88,15 @@ function pickImage(images, landscape = true) {
   const score = (i) => [((i.width || 0) >= (i.height || 0)) === landscape ? 1 : 0, (i.width || 0) * (i.height || 0)];
   return [...images].sort((a, b) => { const x = score(a), y = score(b); return y[0] - x[0] || y[1] - x[1]; })[0].url;
 }
+// Words (month and country names) in English like the rest of the app, whatever the
+// browser's language; plain numbers and dates still follow it.
+const WORDS_LOCALE = "en-GB";
 function fmtDate(d) {
   if (!d) return "";
   const parts = d.split("-");
   if (parts.length === 1) return d;
   const dt = new Date(d + (parts.length === 2 ? "-01" : "") + "T12:00:00");
-  return dt.toLocaleDateString(undefined, parts.length === 2 ? { year: "numeric", month: "short" } : { year: "numeric", month: "short", day: "numeric" });
+  return dt.toLocaleDateString(WORDS_LOCALE, parts.length === 2 ? { year: "numeric", month: "short" } : { year: "numeric", month: "short", day: "numeric" });
 }
 function localToday() {
   const d = new Date();
@@ -138,8 +141,8 @@ function fmtAgo(ts) {
   return new Date(ts * 1000).toLocaleDateString();
 }
 const titleCase = (s) => (s || "").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-// StashDB keeps countries as ISO codes; they're named in the browser's language.
-const regionNames = (() => { try { return new Intl.DisplayNames(undefined, { type: "region" }); } catch { return null; } })();
+// StashDB keeps countries as ISO codes; they're named in English like the rest of the app.
+const regionNames = (() => { try { return new Intl.DisplayNames(WORDS_LOCALE, { type: "region" }); } catch { return null; } })();
 const countryName = (code) => { try { return regionNames?.of(code) || code; } catch { return code; } };
 const COUNTRIES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS " +
   "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET " +
@@ -1376,13 +1379,11 @@ async function viewPerformer(view, id, ctx) {
           <div>${performerFeelings(p)}</div>
           ${p.hidden ? html`<div class="note">Elsewhere performers like this are hidden (Settings, What you want to see).</div>` : ""}
         </div>
+        ${facts.length ? html`<aside class="facts-card hero-sheet"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd title="${typeof v === "string" ? v : ""}">${v}</dd></div>`)}</dl></aside>` : ""}
       </div>
     </section>
     <div id="similar-performers"></div>
-    <div class="detail-grid">
-      <div class="section"><div class="section-head"><h2>Scenes</h2></div><div class="section" id="browser"></div></div>
-      ${facts.length ? html`<aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>` : ""}
-    </div>
+    <div class="section"><div class="section-head"><h2>Scenes</h2></div><div class="section" id="browser"></div></div>
   </div>`.s;
   $(".page", view).addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(photos, +b.dataset.photo, p.name); });
   similarPerformers($("#similar-performers", view), id, ctx);
