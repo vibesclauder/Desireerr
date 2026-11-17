@@ -3172,6 +3172,9 @@ def pick_image(images, landscape=True):
 # HTTP
 # ---------------------------------------------------------------------------------------
 
+FRAMING_HOST = re.compile(r"\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"Desireerr/{VERSION}"
     protocol_version = "HTTP/1.1"
@@ -3202,7 +3205,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Frame-Options", "DENY")
+        if "Content-Security-Policy" not in (headers or {}):  # the page says who may frame it
+            self.send_header("X-Frame-Options", "DENY")
         timing = Timing.current()
         if timing:
             self.send_header("Server-Timing", timing.header())
@@ -3306,8 +3310,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, page, "text/html", {
             "Cache-Control": "no-cache",
             "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; "
-                                       "style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+                                       f"style-src 'self' 'unsafe-inline'; {self.frame_ancestors()}",
         })
+
+    def frame_ancestors(self):
+        """Only a page on the same host (torrent-box's start page) may show it in a frame,
+        under its bar back to the start page. On a Tailscale name, any name of the same tailnet:
+        the start page may have one of its own (a Tailscale Service), without this app's port."""
+        host = (self.headers.get("Host") or "").strip()
+        host = re.sub(r":\d+$", "", host) if not host.endswith("]") else host
+        if not FRAMING_HOST.fullmatch(host):
+            return "frame-ancestors 'none'"
+        tailnet = re.fullmatch(r"[^.]+\.([A-Za-z0-9-]+\.ts\.net)", host, re.IGNORECASE)
+        also = f" http://*.{tailnet[1]}:*" if tailnet else ""
+        return f"frame-ancestors http://{host}:*{also}"
 
     def image(self, query):
         user = self.app.session_user(self.cookie(SESSION_COOKIE))
