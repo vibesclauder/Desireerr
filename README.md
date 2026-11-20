@@ -265,6 +265,26 @@ printf '[Service]\nReadWritePaths=-/path/to/whisparr/root\n' \
 systemctl --user daemon-reload && systemctl --user restart desireerr
 ```
 
+## Docker
+
+The `Dockerfile` builds it straight from this repo, no registry needed:
+
+```sh
+docker build -t desireerr https://github.com/vibesclauder/desireerr.git#main
+docker run -d --name desireerr --network host --user "$(id -u):$(id -g)" \
+    -v ~/desireerr-data:/data -v ~/desireerr-cache:/cache \
+    -v /path/to/whisparr/config:/whisparr:ro -e DESIREERR_WHISPARR_CONFIG=/whisparr/config.xml \
+    -v /path/to/whisparr/root:/path/to/whisparr/root desireerr
+```
+
+Settings and requests are in `/data`, covers in `/cache`. Whisparr's root folders go in at
+the same path as in Whisparr (for the `.nfo` files). Build again for a new version (the same
+command; nothing changed, nothing new). `init` works the same way, its secrets through the
+environment: `docker run --rm -e DESIREERR_ADMIN_USER -e DESIREERR_ADMIN_PASSWORD … desireerr init`.
+To try changes without a build, mount a checkout at `/code`: it runs instead of the built-in
+copy. [torrent-box](https://github.com/vibesclauder/torrent-box) runs it like this, with a
+switch for that.
+
 ## Files
 
 | Path | What |
