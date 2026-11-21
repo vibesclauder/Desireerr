@@ -349,6 +349,32 @@ function recalledList(ctx) {
 function restoreScroll(y) {
   requestAnimationFrame(() => window.scrollTo(0, y));
 }
+// Back to any page: the vertical scroll and every sideways-scrolled row (sliders, cast, photos)
+// are put back where they were, once the page has filled in.
+const SCROLL_ROWS = ".slider, .cast, .hero-photos, .table-wrap";
+const scrollMemory = new Map();  // URL -> { y, rows: [scrollLeft...] }
+function rememberScroll(url) {
+  scrollMemory.delete(url);
+  scrollMemory.set(url, { y: window.scrollY, rows: $$(SCROLL_ROWS).map((el) => el.scrollLeft) });
+  if (scrollMemory.size > LIST_MEMORY_MAX) scrollMemory.delete(scrollMemory.keys().next().value);
+}
+function restorePage(url, ctx) {
+  const m = scrollMemory.get(url);
+  if (!m || (!m.y && !m.rows.some(Boolean))) return;
+  let tries = 0, touched = false;
+  const stop = () => { touched = true; };
+  window.addEventListener("wheel", stop, { once: true, passive: true });
+  window.addEventListener("touchstart", stop, { once: true, passive: true });
+  const apply = () => {
+    if (!ctx.alive() || touched) return;
+    const rows = $$(SCROLL_ROWS);
+    rows.forEach((el, i) => { if (m.rows[i]) el.scrollLeft = m.rows[i]; });
+    window.scrollTo(0, m.y);
+    const done = Math.abs(window.scrollY - m.y) < 2 && rows.length >= m.rows.length;
+    if (!done && ++tries < 30) setTimeout(apply, 100);  // content still loading in
+  };
+  requestAnimationFrame(apply);
+}
 // A request changes a scene's state on remembered lists too.
 function rememberState(sceneId, state) {
   for (const m of listMemory.values()) for (const x of m.items) if (x.id === sceneId) x.state = state;
@@ -457,6 +483,7 @@ async function render() {
   popped = false;
   const left = listMemory.get(currentUrl);
   if (left && currentUrl !== pageUrl()) left.scroll = window.scrollY;
+  if (currentUrl && currentUrl !== pageUrl()) rememberScroll(currentUrl);
   currentUrl = pageUrl();
   if (!status.user && !["/login", "/setup"].includes(path)) {
     try { await refreshStatus(); } catch (e) { root.innerHTML = html`<div class="auth"><div class="auth-card"><div class="error-box">${e.message}</div></div></div>`.s; return; }
@@ -484,6 +511,7 @@ async function render() {
   const ctx = { token, back, alive: () => token === viewToken };
   try {
     await match[0](view, ...match[1].map(decodeURIComponent), ctx);
+    if (back) restorePage(pageUrl(), ctx);
   } catch (e) {
     if (!ctx.alive() || e.status === 401) return;
     view.innerHTML = errorPage(e).s;

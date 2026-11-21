@@ -39,7 +39,7 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3"
+VERSION = "1.4"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
