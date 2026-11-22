@@ -1,7 +1,7 @@
 # Releases: a merge to main publishes the image (latest, and the version in desireerr.py);
 # a push to dev publishes the experimental one (dev). Tests have to pass first, and a version
 # that's published already can't be published again. A release also gets its tag (v<version>)
-# and a GitHub release, with notes made from the commits since the last one.
+# and a GitHub release, its notes the commit subjects since the last one (edit them by hand to taste).
 name: image
 
 on:
@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Tests
         run: python3 -m unittest discover tests
       - name: Tags
@@ -52,6 +54,11 @@ jobs:
         if: github.ref_name == 'main'
         env:
           GH_TOKEN: ${{ github.token }}
+          image: ghcr.io/vibesclauder/desireerr
         run: |
+          previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          { echo "## Changes"; echo
+            git log --no-merges --pretty='- %s' ${previous:+"$previous..HEAD"} | grep -vi '^- Version '
+            echo; echo "Images: \`$image:${{ steps.tags.outputs.version }}\` and \`:latest\`."; } >notes.md
           gh release create "v${{ steps.tags.outputs.version }}" --target "$GITHUB_SHA" \
-            --title "Desireerr ${{ steps.tags.outputs.version }}" --generate-notes --latest
+            --title "Desireerr ${{ steps.tags.outputs.version }}" --notes-file notes.md --latest

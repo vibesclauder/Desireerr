@@ -307,7 +307,7 @@ switch for that, and follows the releases (or `dev`, if you say so).
 Work happens on `dev`; `main` is for releases only. A push to `dev` runs the tests and
 publishes the `dev` image. A merge to `main` (bump `VERSION` in `desireerr.py` first, or it fails) runs
 them again, publishes `latest` and the version's tag, and creates the release `v<version>` on GitHub
-(notes from the commits since the last one). Nothing else publishes.
+(its notes the commit subjects since the last one). Nothing else publishes.
 
 ## Files
 
