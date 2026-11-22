@@ -39,7 +39,9 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.4"
+VERSION = "1.5"
+UPDATE_CHANNELS = ("release", "edge")
+UPDATE_CHANNEL_FILE = "update-channel"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
@@ -2982,6 +2984,34 @@ class App:
         return {"requested": requested, "waiting": waiting}
 
     # -- settings -----------------------------------------------------------------------
+    def update_info(self):
+        """Which image runs, when torrent-box says so (it sets DESIREERR_IMAGE): "release" is
+        its :latest, "edge" the dev branch's :dev. The channel an admin wants is a file in the
+        data folder, which torrent-box's updates read (within the hour). None: not under it."""
+        image = os.environ.get("DESIREERR_IMAGE", "").strip()
+        if not image:
+            return None
+        running = {"latest": "release", "dev": "edge"}.get(image.rpartition(":")[2], "")
+        checkout = Path("/code/desireerr.py").is_file()  # a mounted checkout runs instead
+        wanted = ""
+        try:
+            wanted = (self.data_dir / UPDATE_CHANNEL_FILE).read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        return {"running": running, "checkout": checkout, "changeable": bool(running) and not checkout,
+                "wanted": wanted if wanted in UPDATE_CHANNELS else running}
+
+    def set_update_channel(self, channel):
+        info = self.update_info()
+        if not info or not info["changeable"]:
+            raise ApiError(400, "Updates aren't set here: torrent-box runs a checkout, or a build of one.")
+        if channel not in UPDATE_CHANNELS:
+            raise ApiError(400, "Updates come as release or edge.")
+        path = self.data_dir / UPDATE_CHANNEL_FILE
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(channel + "\n", encoding="utf-8")
+        tmp.replace(path)
+
     def public_settings(self):
         s = self.db.settings()
         file_key = whisparr_config_key()
@@ -3007,6 +3037,7 @@ class App:
             "jellyfin_link": s["jellyfin_link"],
             "write_nfo": s["write_nfo"] == "1",
             "nfo_error": self.nfo_error,
+            "update": self.update_info(),
         }
         try:
             profiles, roots = self.whisparr.options()
@@ -3065,6 +3096,8 @@ class App:
             allowed["jellyfin_key"] = str(body["jellyfin_key"]).strip()
         if "write_nfo" in body:
             allowed["write_nfo"] = "1" if body["write_nfo"] else "0"
+        if "update_channel" in body:
+            self.set_update_channel(body["update_channel"])
         self.db.set_settings(allowed)
         if {"whisparr_url", "whisparr_key"} & allowed.keys():
             self.whisparr.index_time = 0
