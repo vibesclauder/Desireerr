@@ -207,6 +207,16 @@ gets its path in a message.
   be requested again later). Stalled requests come in one push a day (from 10:00), naming
   the ones that stalled since the last.
 
+  **The chip's colour and icon** show where that score stands for you, on a scale made from your
+  own scores for the newest 500 scenes (the ones *Your taste* sorts), so a 30 can be a good
+  match for one person and an ordinary one for another: the top 2% is *very warm* (bright), the
+  next 8% *warm* (rose), the bottom 10% *cool* and the lowest 2% *cold* (violet, with a
+  snowflake below zero), the rest plain. A small profile keeps to floors (warm from 4, very warm
+  from 8, cool from −1, cold from −5). The scale is measured again when your feelings change.
+  A **flame** in place of the ✦ means a scene with a tag you love, nothing you dislike or hate,
+  and a performer you want: filled and glowing for a loved performer, an outline for a liked or
+  followed one.
+
 ## Saved searches
 
 On Scenes (or a tag's, performer's or studio's page), open Filters, pick tags, performers,

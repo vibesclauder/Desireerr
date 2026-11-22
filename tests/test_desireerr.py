@@ -1528,10 +1528,12 @@ class FavouriteTags(Base):
         self.assertEqual(self.app.stash.queries, [])
         self.app.set_tag_feeling(self.user, TAG, "like")
         self.app.browse_scenes({"fav_tags": "1"}, self.user)
-        self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG], "modifier": "INCLUDES"})
+        asked = [q for q in self.app.stash.queries if "tags" in q]  # (a scale measured too, for the chips)
+        self.assertEqual(asked[-1]["tags"], {"value": [TAG], "modifier": "INCLUDES"})
         self.app.set_tag_feeling(self.user, TAG2, "like")
         out = self.app.browse_scenes({"fav_tags": "1", "tags": TAG}, self.user)
-        self.assertEqual(self.app.stash.queries[-1]["tags"], {"value": [TAG, TAG2], "modifier": "INCLUDES"})
+        asked = [q for q in self.app.stash.queries if "tags" in q]
+        self.assertEqual(asked[-1]["tags"], {"value": [TAG, TAG2], "modifier": "INCLUDES"})
         self.assertEqual([x["id"] for x in out["scenes"]], [SCENE])        # OTHER lacks the picked TAG
 
     def test_saved_search_follows_the_favourites(self):
@@ -1568,11 +1570,64 @@ class Taste(Base):
         self.assertIn("tags", self.app.stash.listed[0])                    # StashDB's cached card stays
         self.assertNotIn("taste", self.app.browse_scenes({}, self.admin)["scenes"][0])  # no feelings
 
+    def test_cutoffs_are_measured_with_floors(self):
+        self.assertEqual(d.taste_cutoffs([30] * 10), d.SCALE_FLOORS)            # too small a sample
+        scores = list(range(-10, 90))                                              # 100 of them: -10..89
+        cut = d.taste_cutoffs(scores)
+        self.assertEqual(cut, {"cold": -8, "cool": -1, "warm": 80, "hot": 88})   # 2%, 90%, 98%; 10% is 0: the floor
+        flat = d.taste_cutoffs([0] * 99 + [3])                                     # nearly all the same
+        self.assertEqual(flat, d.SCALE_FLOORS)
+        self.assertLess(flat["cold"], flat["cool"])
+        self.assertLess(flat["warm"], flat["hot"])
+
+    def test_tiers(self):
+        cut = {"cold": -6, "cool": -1, "warm": 18, "hot": 27}
+        tiers = [(None, "hated"), (-9, "cold"), (-6, "cold"), (-2, "cool"), (-1, "cool"), (0, "zero"), (5, "mid"),
+                 (17, "mid"), (18, "warm"), (26, "warm"), (27, "hot"), (70, "hot")]
+        for score, tier in tiers:
+            self.assertEqual(d.taste_tier(score, cut), tier, score)
+
+    def test_flame(self):
+        feel = {"love": 2, "like": 1, "meh": -1, "no": -2}
+        perf = {"loved": (8, "love"), "liked": (4, "like"), "followed": (4, "followed"),
+                "asked": (1.2, "requested"), "disliked": (-4, "dislike"), "hated": (None, "hate")}
+        flame = lambda tags, people: d.flame_level(tags, people, feel, perf)  # noqa: E731
+        self.assertEqual(flame(["love"], ["loved"]), "hi")
+        self.assertEqual(flame(["love", "like"], ["loved", "liked"]), "hi")
+        self.assertEqual(flame(["love"], ["liked"]), "lo")
+        self.assertEqual(flame(["love"], ["followed"]), "lo")
+        self.assertIsNone(flame(["love"], ["asked"]))                  # asked for, not wanted enough
+        self.assertIsNone(flame(["like"], ["loved"]))                  # needs a loved tag
+        self.assertIsNone(flame(["love", "meh"], ["loved"]))           # nothing disliked
+        self.assertIsNone(flame(["love", "no"], ["loved"]))
+        self.assertIsNone(flame(["love"], ["loved", "disliked"]))
+        self.assertIsNone(flame(["love"], ["loved", "hated"]))
+        self.assertIsNone(flame(["love"], []))
+
+    def test_cards_carry_tier_and_flame(self):
+        got = {x["id"]: x for x in self.app.browse_scenes({}, self.user)["scenes"]}
+        self.assertEqual(got["s1"]["taste_tier"], "warm")          # 4: the floors, this tiny feed being
+        self.assertEqual(got["s3"]["taste_tier"], "hated")         # a thin sample
+        self.assertEqual(got["s2"]["taste_tier"], "cool")
+        self.assertIsNone(got["s1"]["taste_fire"])
+
+    def test_scale_is_measured_once_and_again_after_a_change(self):
+        self.app.stash.queries.clear()
+        first = self.app.taste_scale(self.user)
+        asked = len(self.app.stash.queries)
+        self.assertGreater(asked, 0)
+        self.assertEqual(self.app.taste_scale(self.user), first)
+        self.assertEqual(len(self.app.stash.queries), asked)       # kept
+        self.app.set_tag_feeling(self.user, "like", "love")        # feelings changed: measured anew
+        self.app.taste_scale(self.user)
+        self.assertGreater(len(self.app.stash.queries), asked)
+        self.assertEqual(self.app.taste_scale(None), d.SCALE_FLOORS)
+
     def test_sorted_by_taste(self):
         out = self.app.browse_scenes({"sort": "TASTE", "performers": "aaaaaaaa-1", "per_page": "2"}, self.user)
         self.assertEqual([x["id"] for x in out["scenes"]], ["s1", "s5"])   # 4 and 4: the newest first
         self.assertEqual((out["count"], out["newest"]), (5, False))
-        q = self.app.stash.queries[-1]
+        q = [q for q in self.app.stash.queries if "performers" in q][-1]
         self.assertEqual((q["sort"], q["per_page"], q["performers"]["value"]), ("DATE", 100, ["aaaaaaaa-1"]))
         out = self.app.browse_scenes({"sort": "TASTE", "page": "3", "per_page": "2"}, self.user)
         self.assertEqual([x["id"] for x in out["scenes"]], ["s3"])         # the hated one last

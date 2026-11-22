@@ -263,10 +263,12 @@ const ICONS = {
   bookmark: '<path d="M6 3.5h12v17l-6-4.2-6 4.2z"/>',
   similar: '<circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>',
   sparkle: '<path fill="currentColor" stroke="none" d="M12 2c.8 5.6 4.4 9.2 10 10-5.6.8-9.2 4.4-10 10-.8-5.6-4.4-9.2-10-10 5.6-.8 9.2-4.4 10-10z"/>',
+  flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+  snow: '<path d="M2 12h20M12 2v20m4-18-4 4-4-4m8 16-4-4-4 4M20 16l-4-4 4-4M4 8l4 4-4 4"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/>',
   wine: '<path d="M7.5 3h9c.4 4.6-1.4 8-4.5 8S7.1 7.6 7.5 3zM12 11v9.5M8.5 20.5h7"/>',
 };
-const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`);
+const icon = (name, cls = "") => raw(`<svg ${cls ? `class="${cls}" ` : ""}viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`);
 
 // ---------------------------------------------------------------------------------------
 // State, router, shell
@@ -566,6 +568,20 @@ function progressBar(st) {
 }
 const noImg = (ic = "film") => html`<div class="noimg">${icon(ic)}</div>`;
 
+// The taste chip: the score on a step of the user's own scale (taste_tier: cold, cool, typical,
+// warm, very warm, from the server), the icon a flame when the scene is a match with a performer
+// they want (taste_fire: hi for a loved one, lo for a liked one), a snowflake below zero.
+const TIER_WORDS = { hot: "Very warm", warm: "Warm", mid: "Some overlap", zero: "Nothing known", cool: "Not your thing", cold: "Really not for you" };
+const FLAME_WORDS = { hi: "Perfect match: a loved performer and a loved tag, nothing you dislike", lo: "Good match: a liked performer and a loved tag, nothing you dislike" };
+function tasteChip(s, why = "Your taste: what its tags and performers add by how you feel about them") {
+  if (s.hated || s.taste === null) return html`<span class="points hated" title="It has a tag or performer you hate">${icon("ban")}</span>`;
+  if (s.taste == null) return "";
+  const tier = s.taste_tier || "mid";
+  const ic = s.taste_fire ? icon("flame", `fl ${s.taste_fire}`) : s.taste < 0 ? icon("snow") : icon("sparkle");
+  const title = [s.taste_fire ? FLAME_WORDS[s.taste_fire] : TIER_WORDS[tier], why].filter(Boolean).join(". ");
+  return html`<span class="points ${tier}" title="${title}">${ic}${s.taste}</span>`;
+}
+
 // Under a scene's title: its taste points and the tags and performers that make them, most first.
 const WHY = { followed: "followed", requested: "from your requests", love: "loved", like: "liked", dislike: "disliked", hate: "hated" };
 function tasteLine(s) {
@@ -573,7 +589,7 @@ function tasteLine(s) {
   const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
   const parts = (s.taste_parts || []).slice(0, 8);
   return html`<div class="taste-line" title="Your taste: what its tags add by how you feel about them (a rare tag more, a common one less${me.sommelier ? ", times your Sommelier multipliers" : ""}), and its performers: favourites and followed ones, the ones you request, and the ones you want less of${s.taste_several ? ". It's cut together from several scenes, so only the best and the worst performer count." : ""}">
-    ${s.taste === null ? html`<span class="points hated">${icon("ban")}</span>` : html`<span class="points">${icon("sparkle")}${s.taste}</span>`}
+    ${tasteChip(s, "")}
     ${parts.map((t) => t.kind === "performer"
       ? html`<span class="${t.points === null || t.points < 0 ? "feel-dislike" : "feel-like"}">${t.name} ${t.points === null ? "" : sign(t.points)} <small>(${WHY[t.why]})</small></span>`
       : html`<span class="feel-${t.feeling}">${t.name} ${t.points === null ? "(hated)" : sign(t.points)}</span>`)}
@@ -590,8 +606,7 @@ function sceneCard(s) {
   // nothing to request): under a scene, how similar it is to that one; then your taste for it.
   const chips = [
     s.points != null ? html`<span class="points similar" title="Similarity to this scene: the performers and tags they share, and the tags you love or like">${icon("similar")}${s.points}</span>` : "",
-    s.hated ? html`<span class="points hated" title="It has a tag you hate">${icon("ban")}</span>`
-      : s.taste != null ? html`<span class="points" title="Your taste: what its tags and performers add by how you feel about them">${icon("sparkle")}${s.taste}</span>` : "",
+    s.hated || s.taste != null ? tasteChip(s) : "",
   ].filter(Boolean);
   const points = chips.length ? html`<div class="scores ${canRequest(s.state) ? "" : "beside"}">${chips}</div>` : "";
   return html`<div class="card scene-card" data-scene="${s.id}">
@@ -623,7 +638,7 @@ function personCard(p) {
       : p.followed ? html`<span class="fav" title="Followed">${icon("bell")}</span>` : ""}
     ${p.similarity != null ? html`<div class="scores">
       <span class="points similar" title="How alike: looks, country and era">${icon("similar")}${p.similarity}</span>
-      ${p.taste != null ? html`<span class="points" title="Your taste for their newest scenes, on average">${icon("sparkle")}${p.taste}</span>` : ""}</div>` : ""}
+      ${p.taste != null ? tasteChip(p, "Your taste for their newest scenes, on average") : ""}</div>` : ""}
     <div class="name">${p.name}${p.like ? html`<small>Like ${p.like}</small>` : p.disambiguation ? html`<small>${p.disambiguation}</small>` : p.scene_count ? html`<small>${p.scene_count} scenes</small>` : ""}</div>
   </a>`;
 }

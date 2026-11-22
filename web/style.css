@@ -164,6 +164,23 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .points.similar svg { color: #93c5fd; stroke-width: 2.4; }
 .points.hated { padding: 2px 5px; }
 .points.hated svg { color: #fca5a5; }
+/* the taste chip's steps: warm for what you want, cool for what you don't, on the user's own scale */
+.points.hot { background: rgba(120,20,50,.9); color: #ffe4ea; box-shadow: 0 0 0 1px rgba(255,92,120,.6); }
+.points.hot svg { color: #ff5c78; }
+.points.warm svg { color: var(--accent-hi); }
+.points.mid { color: var(--fg-2); }
+.points.mid svg { color: #c9a3ae; }
+.points.zero { color: var(--muted); }
+.points.zero svg { color: #6f6879; }
+.points.cool { background: rgba(46,38,84,.85); color: #ddd6fe; }
+.points.cool svg { color: #c4b5fd; stroke-width: 2; }
+.points.cold { background: rgba(67,44,130,.9); color: #ede9fe; box-shadow: 0 0 0 1px rgba(196,181,253,.5); }
+.points.cold svg { color: #c4b5fd; stroke-width: 2; }
+/* a flame takes the icon's place: filled and glowing for a loved performer, outlined for a liked one */
+.points svg.fl { width: 13px; height: 13px; stroke-width: 2; }
+.points svg.fl.hi { color: #ffedd5; fill: #fb923c; filter: drop-shadow(0 0 3px rgba(251,146,60,.9)); }
+.points svg.fl.lo { color: #d6a15a; fill: none; }
+.taste-line .points svg.fl { width: 15px; height: 15px; }
 .scene-card .scores { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; pointer-events: none; }
 .scene-card .scores.beside { right: 40px; }
 /* Keyboard focus shows Request too, but not the focus a click (or the photo viewer) leaves behind. */
@@ -326,6 +343,9 @@ textarea.input { height: auto; padding: 10px 12px; }
 .taste-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 13px; color: var(--fg-2); margin-top: -4px; }
 .taste-line .points { font-size: 13px; padding: 2px 9px 2px 7px; background: var(--surface-2); }
 .taste-line .points svg { width: 13px; height: 13px; }
+.taste-line .points.hot { background: rgba(120,20,50,.9); }
+.taste-line .points.cool { background: rgba(46,38,84,.85); }
+.taste-line .points.cold { background: rgba(67,44,130,.9); }
 .taste-line .feel-love, .taste-line .feel-like { color: var(--accent-hi); }
 .taste-line .feel-dislike, .taste-line .feel-hate { color: #fca5a5; }
 .cast-feel { display: inline-flex; vertical-align: -2px; }

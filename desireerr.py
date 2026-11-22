@@ -150,6 +150,15 @@ MIGHT_LIKE_TASTE_WEIGHT = 3.0  # an average taste is small (a few points a scene
 MIGHT_LIKE_SEEDS = 10        # the performers loved most lately
 MIGHT_LIKE_EACH = 3          # suggestions like any one of them, at most
 TASTE_POOL = 500             # sorted by taste: this many of the newest matching scenes
+# The taste chip's steps come from the user's own scores on those newest scenes: the top 2% is
+# very warm, the next 8% warm, the bottom 10% cool and the lowest 2% cold, but no lower or
+# higher than these floors, for a profile that gives most scenes the same score. Measured
+# again every SCALE_TTL (and when the user's feelings change); SCALE_RETRY after a failure.
+SCALE_FLOORS = {"cold": -5, "cool": -1, "warm": 4, "hot": 8}
+SCALE_SHARES = {"cold": 0.02, "cool": 0.10, "warm": 0.90, "hot": 0.98}
+SCALE_MIN_SAMPLE = 100
+SCALE_TTL = 6 * 3600
+SCALE_RETRY = 60
 TASTE_TTL = 600
 
 DEFAULT_SETTINGS = {
@@ -1399,6 +1408,52 @@ def taste(weights, performers=0):
     return None if hated or performers is None else round(liked - disliked + performers)
 
 
+def taste_cutoffs(scores):
+    """The steps of the taste chip from a sample of a user's SCORES: {"cold", "cool", "warm",
+    "hot"}, a score at or below the first two or at or above the last two being that step.
+    The SCALE_SHARES of the sample, kept to SCALE_FLOORS (which is all of it for a small one)."""
+    cut = dict(SCALE_FLOORS)
+    if len(scores) >= SCALE_MIN_SAMPLE:
+        xs = sorted(scores)
+        at = {k: xs[min(len(xs) - 1, int(share * len(xs)))] for k, share in SCALE_SHARES.items()}
+        cut = {"cold": min(at["cold"], cut["cold"]), "cool": min(at["cool"], cut["cool"]),
+               "warm": max(at["warm"], cut["warm"]), "hot": max(at["hot"], cut["hot"])}
+    cut["cold"] = min(cut["cold"], cut["cool"] - 1)
+    cut["hot"] = max(cut["hot"], cut["warm"] + 1)
+    return cut
+
+
+def taste_tier(score, cut):
+    """Which step of the taste chip a SCORE is, by CUT (taste_cutoffs): hated (None), cold,
+    cool, mid, zero, warm or hot."""
+    if score is None:
+        return "hated"
+    if score <= cut["cold"]:
+        return "cold"
+    if score <= cut["cool"]:
+        return "cool"
+    if score >= cut["hot"]:
+        return "hot"
+    if score >= cut["warm"]:
+        return "warm"
+    return "zero" if score == 0 else "mid"
+
+
+def flame_level(tags, people, feel, perf):
+    """A scene's flame: "hi" with a loved tag, a performer who's loved (PERFORMER_SCORE's 8) and
+    nothing disliked or hated, "lo" with one worth at least a liked one's (PERFORMER_POINTS: liked
+    or followed) instead; else None. TAGS and PEOPLE are IDs, FEEL and PERF as for weigh_tags
+    and performer_points."""
+    tags = set(tags)
+    if any(feel.get(t, 0) < 0 for t in tags) or not any(feel.get(t, 0) == FEELINGS["love"] for t in tags):
+        return None
+    values = [perf[p][0] for p in set(people) if p in perf]
+    if any(v is None or v < 0 for v in values):
+        return None
+    best = max(values, default=0)
+    return "hi" if best >= PERFORMER_SCORE[2] else "lo" if best >= PERFORMER_POINTS else None
+
+
 def performer_points(people, tags, perf):
     """What a scene's PEOPLE (performer IDs) add by PERF (performer ID -> (points, why), points
     None for a hated one): all of them, or in a video of several scenes (TAGS has one of
@@ -1510,6 +1565,8 @@ class App:
         self.nfo_missing = {}    # scene id -> when StashDB didn't have it
         self.discover_cache = {}  # user id -> (when made, {row key: row}), see discover
         self.discover_lock = threading.Lock()
+        self.scales = {}         # user ID -> the taste chip's steps and until when (taste_scale)
+        self.scale_lock = threading.Lock()
         self.rare = None         # tag id -> rarity, from tag_scenes (see count_tags)
         self.kinds = (0, {})     # (when asked, tag id -> kind), see kind_tags
         self.nfo_error = ""
@@ -1676,11 +1733,14 @@ class App:
         feel, perf = self.feelings(user), self.performer_taste(user)
         if feel or perf:
             rare, tune, tags = self.rarities(), self.tuning(user), self.card_tags(scenes)
+            cut = self.taste_scale(user)
             for s in scenes:
                 have = tags.get(s["id"], ())
                 s["taste"] = taste(weigh_tags(have, feel, rare=rare, tune=tune),
                                    performer_points(card_people(s), have, perf))
                 s["hated"] = s["taste"] is None
+                s["taste_tier"] = taste_tier(s["taste"], cut)
+                s["taste_fire"] = flame_level(have, card_people(s), feel, perf)
         for s in scenes:
             s.pop("tags", None)
         self.whisparr.ensure_fresh()
@@ -2194,8 +2254,10 @@ class App:
         with self.discover_lock:
             if user:
                 self.discover_cache.pop(user["id"], None)
+                self.scales.pop(user["id"], None)  # the chip's steps too: measured again
             else:
                 self.discover_cache.clear()
+                self.scales.clear()
 
     def new_with_favourites(self, user, ttl=300):
         """Discover's row: the newest scenes with the favourite performers (see
@@ -2281,6 +2343,8 @@ class App:
                                    performer_points(card_people(scene), tags, perf))
             scene["taste_parts"] = sorted(parts, key=lambda t: -abs(t["points"] if t["points"] is not None else 99))
             scene["taste_several"] = bool(MULTI_SCENE_TAGS & set(tags))  # performers: best and worst only
+            scene["taste_tier"] = taste_tier(scene["taste"], self.taste_scale(user))
+            scene["taste_fire"] = flame_level(tags, card_people(scene), feel, perf)
         return scene
 
     def similar(self, scene_id, user=None):
@@ -2503,6 +2567,7 @@ class App:
             card.update(extra, similarity=round(score))
             if pid in tastes:
                 card["taste"] = round(tastes[pid])
+                card["taste_tier"] = taste_tier(card["taste"], self.taste_scale(user))
             out.append(card)
         return out
 
@@ -2666,6 +2731,47 @@ class App:
             for p in set(card_people(sc)):
                 sums[p] = sums.get(p, 0) + 0.5 ** (max(0, at - r["created"]) / AFFINITY_HALF_LIFE)
         return {p: 1 - 0.5 ** (n / 2) for p, n in sums.items()}
+
+    def taste_scale(self, user):
+        """The user's taste chip steps (taste_cutoffs), measured on first use and then kept
+        until their feelings change (forget_discover) or SCALE_TTL; the floors if StashDB can't
+        be asked."""
+        if not user:
+            return dict(SCALE_FLOORS)
+        entry = self.scales.get(user["id"])
+        if entry and entry["until"] > now():
+            return entry["cut"]
+        with self.scale_lock:
+            entry = self.scales.get(user["id"])
+            if entry and entry["until"] > now():
+                return entry["cut"]
+            try:
+                cut, ttl = taste_cutoffs(self.sample_scores(user)), SCALE_TTL
+            except ApiError:
+                cut, ttl = dict(SCALE_FLOORS), SCALE_RETRY
+            self.scales[user["id"]] = {"cut": cut, "until": now() + ttl}
+            return cut
+
+    def sample_scores(self, user):
+        """The user's taste scores for the newest TASTE_POOL scenes they'd see (the pool
+        "Your taste" sorts, kept TASTE_TTL), without those with a hated tag or performer."""
+        feel, perf = self.feelings(user), self.performer_taste(user)
+        if not (feel or perf):
+            return []
+        inp = self.scene_input({"sort": "DATE", "direction": "DESC"}, [])
+        pool, page = [], 1
+        while len(pool) < TASTE_POOL:
+            got = self.stash.query_scenes(dict(inp, page=page, per_page=PER_PAGE_MAX, sort="DATE",
+                                               direction="DESC"), TASTE_TTL)
+            pool += got["scenes"]
+            if len(got["scenes"]) < PER_PAGE_MAX:
+                break
+            page += 1
+        scenes = self.shown(pool[:TASTE_POOL], user)
+        rare, tune, tags = self.rarities(), self.tuning(user), self.card_tags(scenes)
+        scores = [taste(weigh_tags(tags.get(s["id"], ()), feel, rare=rare, tune=tune),
+                        performer_points(card_people(s), tags.get(s["id"], ()), perf)) for s in scenes]
+        return [v for v in scores if v is not None]
 
     def performer_taste(self, user):
         """Performer ID -> (points, why) for the user's taste: by their feeling for them,
