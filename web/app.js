@@ -476,12 +476,26 @@ function shell() {
   return $("#view");
 }
 
+// Draw this page again after something was done on it (a request, a feeling, a saved setting),
+// where it is: the scroll, the rows scrolled sideways and what "Load more" loaded stay, and the
+// page isn't blanked meanwhile.
+let inPlace = false;
+function refresh() {
+  const m = listMemory.get(pageUrl());
+  if (m) m.scroll = window.scrollY;
+  rememberScroll(pageUrl());
+  popped = true;
+  inPlace = true;
+  return render();
+}
+
 async function render() {
   closeLightbox();
   const token = ++viewToken;
   const path = location.pathname;
   const back = popped;
-  popped = false;
+  const stay = inPlace;
+  popped = inPlace = false;
   const left = listMemory.get(currentUrl);
   if (left && currentUrl !== pageUrl()) left.scroll = window.scrollY;
   if (currentUrl && currentUrl !== pageUrl()) rememberScroll(currentUrl);
@@ -506,8 +520,10 @@ async function render() {
   }
   $$("[data-nav]").forEach((a) => a.classList.toggle("on", !!match && a.dataset.nav === match[2]));
   if (path !== "/search") $("#search").value = "";
-  view.innerHTML = html`<div class="center"><div class="spinner"></div></div>`.s;
-  window.scrollTo(0, 0);
+  if (!stay) {
+    view.innerHTML = html`<div class="center"><div class="spinner"></div></div>`.s;
+    window.scrollTo(0, 0);
+  }
   if (!match) { view.innerHTML = html`<div class="page"><div class="empty">There's no page here. <a href="/">Go to Discover</a></div></div>`.s; return; }
   const ctx = { token, back, alive: () => token === viewToken };
   try {
@@ -741,12 +757,12 @@ document.addEventListener("click", async (e) => {
         hate: "Hated: scenes with it are never recommended under a scene.",
       }[f]);
       await refreshStatus();
-      render();
+      refresh();
     } else if (act === "favorite") {
       const fav = b.dataset.favorite === "1";
       await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
       toast(fav ? "A favourite studio: a filter on Scenes and Studios. Nothing is downloaded for it." : "Not a favourite any more.");
-      render();
+      refresh();
     } else if (act === "pfeeling") {
       const f = b.dataset.feeling;
       const r = await api("performer-feelings", { method: "POST", body: { id: b.dataset.id, feeling: f } });
@@ -759,12 +775,12 @@ document.addEventListener("click", async (e) => {
         hate: "Hated: their scenes are never recommended, and rank last by your taste.",
       }[f]);
       await refreshStatus();
-      render();
+      refresh();
     } else if (act === "follow") {
       const follow = b.dataset.follow === "1";
       await api("follow", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, follow } });
       toast(follow ? "Following. Its new scenes, from today on, are requested for you every hour; it's under Saved searches." : "Not following any more. Its requests so far stay.");
-      render();
+      refresh();
     }
   } catch (err) {
     if (err.status !== 401) toast(err.message, true);
@@ -778,14 +794,14 @@ function afterChange(sceneId, state, failed = false) {
   refreshStatus().catch(() => {});
   if (sceneId && state) rememberState(sceneId, state);
   const p = location.pathname;
-  if (p.startsWith("/scene/") || p === "/requests" || (failed && sceneId === null && p === "/")) return render();
+  if (p.startsWith("/scene/") || p === "/requests" || (failed && sceneId === null && p === "/")) return refresh();
   if (sceneId && state) {
     $$(`.scene-card[data-scene="${CSS.escape(sceneId)}"]`).forEach((card) => {
       $(".quick", card).innerHTML = sceneQuick({ id: sceneId, state }).s;
       $(".progress", card)?.remove();
     });
   } else if (!failed) {
-    render();
+    refresh();
   }
 }
 
@@ -1743,7 +1759,7 @@ async function viewSaved(view, ctx) {
     const box = e.target.closest("[data-wact=ask]");
     if (!box) return;
     try { await put(box.closest("[data-watch]").dataset.watch, { ask_first: box.checked }); toast(box.checked ? "Its requests wait for your approval." : "Its requests go straight to Whisparr."); }
-    catch (err) { toast(err.message, true); render(); }
+    catch (err) { toast(err.message, true); refresh(); }
   });
   page.addEventListener("click", async (e) => {
     const b = e.target.closest("button[data-wact]");
@@ -1766,7 +1782,7 @@ async function viewSaved(view, ctx) {
         await api(`watches/${id}`, { method: "DELETE" });
         toast(`Deleted “${w.name}”. Its requests stay.`);
       }
-      render();
+      refresh();
     } catch (err) { toast(err.message, true); b.classList.remove("busy"); }
   });
 }
@@ -1835,7 +1851,7 @@ function viewContentFirst(view) {
       <p class="lede">Other kinds of scene are hidden everywhere: Discover, Scenes, Search, and what your saved searches request. You can change this at the top of Settings.</p>
       ${contentForm()}
     </section></div>`.s;
-  wireContentForm(view, () => { toast("Saved."); render(); });
+  wireContentForm(view, () => { toast("Saved."); refresh(); });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2091,7 +2107,7 @@ async function viewSettings(view, ctx) {
     if (!key) return toast("Paste a key first.", true);
     await api("settings", { method: "PUT", body: { stashdb_key: key } });
     toast("StashDB accepted the key. Saved.");
-    render();
+    refresh();
   });
   submit("#wh-form", async (form) => {
     const d = formData(form);
@@ -2099,7 +2115,7 @@ async function viewSettings(view, ctx) {
     if (d.whisparr_key) body.whisparr_key = d.whisparr_key;
     const res = await api("settings", { method: "PUT", body });
     toast(res.whisparr_error ? `Saved, but: ${res.whisparr_error}` : "Saved.", !!res.whisparr_error);
-    render();
+    refresh();
   });
   const saveNotify = (form) => api("settings", { method: "PUT", body: {
     notify_server: form.notify_server.value, notify_topic: form.notify_topic.value, app_url: form.app_url.value,
@@ -2118,7 +2134,7 @@ async function viewSettings(view, ctx) {
     const res = await api("settings", { method: "PUT", body });
     toast(res.jellyfin_error ? `Saved, but: ${res.jellyfin_error}` : "Saved.", !!res.jellyfin_error);
     await refreshStatus();
-    render();
+    refresh();
   });
   submit("#pr-form", async (form) => {
     await api("settings", { method: "PUT", body: { tab_title: form.tab_title.value } });
@@ -2129,7 +2145,7 @@ async function viewSettings(view, ctx) {
     const d = formData(form);
     await api("users", { method: "POST", body: { username: d.username, password: d.password, auto_approve: form.auto_approve.checked, is_admin: form.is_admin.checked } });
     toast(`Added ${d.username}.`);
-    render();
+    refresh();
   });
   submit("#pw-form", async (form) => {
     await api("password", { method: "POST", body: { current: form.current.value, new: form.new.value } });
@@ -2159,8 +2175,8 @@ async function viewSettings(view, ctx) {
     const row = e.target.closest("[data-user]");
     if (!field || !row) return;
     const value = field === "is_admin" ? e.target.value === "1" : e.target.checked;
-    try { await api(`users/${row.dataset.user}`, { method: "PUT", body: { [field]: value } }); toast("Saved."); if (field === "is_admin") render(); }
-    catch (err) { toast(err.message, true); render(); }
+    try { await api(`users/${row.dataset.user}`, { method: "PUT", body: { [field]: value } }); toast("Saved."); if (field === "is_admin") refresh(); }
+    catch (err) { toast(err.message, true); refresh(); }
   });
   page.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-uact]");
@@ -2169,7 +2185,7 @@ async function viewSettings(view, ctx) {
     const name = $("b", row).textContent;
     if (b.dataset.uact === "del") {
       if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = `Delete ${name}?`; setTimeout(() => { if (b.isConnected) { b.dataset.sure = ""; b.textContent = "Delete"; } }, 4000); return; }
-      try { await api(`users/${row.dataset.user}`, { method: "DELETE" }); toast(`Deleted ${name}.`); render(); } catch (err) { toast(err.message, true); }
+      try { await api(`users/${row.dataset.user}`, { method: "DELETE" }); toast(`Deleted ${name}.`); refresh(); } catch (err) { toast(err.message, true); }
     } else if (b.dataset.uact === "pw") {
       const cell = b.parentElement;
       cell.innerHTML = html`<form class="btns" data-pwform><input class="input" type="password" minlength="8" placeholder="New password" required autocomplete="new-password" style="width:160px"><button class="btn small primary">Set</button></form>`.s;
@@ -2177,7 +2193,7 @@ async function viewSettings(view, ctx) {
       $("input", f).focus();
       f.onsubmit = async (ev) => {
         ev.preventDefault();
-        try { await api(`users/${row.dataset.user}`, { method: "PUT", body: { password: $("input", f).value } }); toast(`New password set for ${name}.`); render(); }
+        try { await api(`users/${row.dataset.user}`, { method: "PUT", body: { password: $("input", f).value } }); toast(`New password set for ${name}.`); refresh(); }
         catch (err) { toast(err.message, true); }
       };
     }
