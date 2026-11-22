@@ -1968,8 +1968,9 @@ async function viewSettings(view, ctx) {
     <h2>On this device</h2>
     <label class="check"><input type="checkbox" id="pv-covers" ${document.body.classList.contains("hide-covers") ? "checked" : ""}> Blur covers until I point at them (the eye button in the top bar does the same)</label>
   </section>`;
+  const conn = [], access = [];  // the app's settings (admins): what it connects to, who gets in
   if (me.is_admin) {
-    parts.push(html`<section class="panel">
+    conn.push(html`<section class="panel">
       <h2>StashDB</h2>
       <p class="lede">Scenes, performers, studios and tags come from StashDB. The API key is on your stashdb.org profile page. Performers an admin loves or likes become favourites on that account, for other tools that read it.</p>
       <form class="form-grid" id="sd-form">
@@ -1977,7 +1978,7 @@ async function viewSettings(view, ctx) {
         <div class="btns"><button class="btn primary">Save key</button><span class="note ${s.stashdb_key_set ? "ok-text" : "bad-text"}">${s.stashdb_key_set ? "A key is saved." : "No key yet: browsing won't work until you add one."}</span></div>
       </form>
     </section>`);
-    parts.push(html`<section class="panel">
+    conn.push(html`<section class="panel">
       <h2>Whisparr</h2>
       <p class="lede">Approved requests are added to Whisparr and searched for.</p>
       ${s.whisparr_error ? html`<div class="error-box">${s.whisparr_error}</div>` : ""}
@@ -1991,7 +1992,7 @@ async function viewSettings(view, ctx) {
         <div class="btns"><button class="btn primary">Save</button></div>
       </form>
     </section>`);
-    parts.push(html`<section class="panel">
+    conn.push(html`<section class="panel">
       <h2>Notifications</h2>
       <p class="lede">Pushes through ntfy, like Seerr's. Subscribe to the topic in the ntfy app.</p>
       ${s.notify_error ? html`<div class="error-box">${s.notify_error}</div>` : ""}
@@ -2004,7 +2005,7 @@ async function viewSettings(view, ctx) {
         <div class="btns"><button class="btn primary">Save</button><button class="btn ghost" type="button" id="nt-test">Save and send a test</button></div>
       </form>
     </section>`);
-    parts.push(html`<section class="panel">
+    conn.push(html`<section class="panel">
       <h2>Jellyfin</h2>
       <p class="lede">With an API key, downloaded scenes get a Watch button that opens them in Jellyfin.</p>
       ${s.jellyfin_error ? html`<div class="error-box">${s.jellyfin_error}</div>` : ""}
@@ -2017,7 +2018,7 @@ async function viewSettings(view, ctx) {
         <div class="btns"><button class="btn primary">Save</button>${s.jellyfin_key_set && !s.jellyfin_error ? html`<span class="note ok-text">Connected: Jellyfin has ${s.jellyfin_videos} videos.</span>` : ""}</div>
       </form>
     </section>`);
-    parts.push(html`<section class="panel">
+    access.push(html`<section class="panel">
       <h2>Privacy</h2>
       <form class="form-grid" id="pr-form">
         <label class="field"><span>Browser tab title</span><input class="input" name="tab_title" value="${s.tab_title}" maxlength="40"></label>
@@ -2025,7 +2026,7 @@ async function viewSettings(view, ctx) {
       </form>
       <p class="lede" style="margin:0">Shown in tabs, bookmarks and the sign-in page. Set something neutral if others see your screen.</p>
     </section>`);
-    parts.push(html`<section class="panel" style="max-width:none">
+    access.unshift(html`<section class="panel" style="max-width:none">
       <h2>Users</h2>
       <p class="lede">Admins approve requests and change settings. Auto-approved users' requests go straight to Whisparr; everyone else's wait for an admin.</p>
       <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Auto-approve</th><th class="num">Requests</th><th>Added</th><th></th></tr></thead><tbody>
@@ -2047,7 +2048,16 @@ async function viewSettings(view, ctx) {
       </form>
     </section>`);
   }
-  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>${content}${parts}${account}${taste}${privacy}</div>`.s;
+  const group = (id, title, lede, ...bodies) => html`<section class="settings-group" id="${id}">
+    <div class="group-head"><h2>${title}</h2><p>${lede}</p></div>${bodies}</section>`;
+  const jump = [["g-you", "Your settings"], ["g-conn", "Connections"], ["g-access", "Users & privacy"]];
+  view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>
+    ${me.is_admin ? html`<nav class="jump" aria-label="Sections">${jump.map(([id, label]) => html`<button type="button" class="chip" data-jump="${id}">${label}</button>`)}</nav>` : ""}
+    ${group("g-you", "Your settings", "Only for your account and this device.", content, taste, privacy, account)}
+    ${me.is_admin ? html`${group("g-conn", "Connections", "App settings, for admins: where scenes come from and where requests, pushes and Watch buttons go.", conn)}
+    ${group("g-access", "Users & privacy", "App settings, for admins: who can sign in and what others see.", access)}` : ""}
+  </div>`.s;
+  $$("[data-jump]", view).forEach((b) => { b.onclick = () => $("#" + b.dataset.jump, view)?.scrollIntoView({ behavior: "smooth", block: "start" }); });
   wireContentForm(view, () => toast("Saved. Pages show what you picked from now on."));
 
   const formData = (form) => Object.fromEntries(new FormData(form).entries());

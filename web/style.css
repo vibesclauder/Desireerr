@@ -479,6 +479,13 @@ body.lb-open { overflow: hidden; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: grid; gap: 14px; max-width: 760px; }
 .panel h2 { font-size: 17px; }
 .panel .lede { color: var(--muted); font-size: 14px; margin: -6px 0 0; }
+.settings-group { display: grid; gap: 14px; scroll-margin-top: 70px; }
+.group-head { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.group-head h2 { font-size: 21px; font-weight: 800; letter-spacing: -.01em; }
+.group-head p { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
+.jump { display: flex; gap: 8px; flex-wrap: wrap; margin-top: -12px; }
+.chip { background: var(--surface); border: 1px solid var(--line); color: var(--text, inherit); border-radius: 99px; padding: 6px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.chip:hover { border-color: var(--muted); }
 .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
