@@ -317,3 +317,12 @@ python3 desireerr.py --port 5099 --data /tmp/d/data --cache /tmp/d/cache
 python3 tools/make_icons.py     # redraw the PNG icons after changing the logo
 python3 tools/make_social.py    # GitHub's social preview, .github/social-preview.png
 ```
+
+## Built with AI
+
+Most of Desireerr's code, tests and documentation were written by an AI assistant,
+[Claude](https://claude.com/claude-code) from Anthropic, working under the direction of the
+maintainer, who decides what gets built, runs the result on a real setup and merges it. Claude
+is credited as co-author on the commits. The code has a test suite (`python3 -m unittest
+discover -s tests`) and runs against a real Whisparr, but it hasn't had the scrutiny of a
+long-lived project: read it before you trust it with your network, and report what you find.
