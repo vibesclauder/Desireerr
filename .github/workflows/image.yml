@@ -1,6 +1,7 @@
 # Releases: a merge to main publishes the image (latest, and the version in desireerr.py);
 # a push to dev publishes the experimental one (dev). Tests have to pass first, and a version
-# that's published already can't be published again.
+# that's published already can't be published again. A release also gets its tag (v<version>)
+# and a GitHub release, with notes made from the commits since the last one.
 name: image
 
 on:
@@ -8,7 +9,7 @@ on:
     branches: [main, dev]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -29,6 +30,7 @@ jobs:
               exit 1
             fi
             echo "tags=$image:latest,$image:$version" >>"$GITHUB_OUTPUT"
+            echo "version=$version" >>"$GITHUB_OUTPUT"
           else
             echo "tags=$image:dev" >>"$GITHUB_OUTPUT"
           fi
@@ -46,3 +48,10 @@ jobs:
           push: true
           provenance: false
           tags: ${{ steps.tags.outputs.tags }}
+      - name: Release
+        if: github.ref_name == 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.tags.outputs.version }}" --target "$GITHUB_SHA" \
+            --title "Desireerr ${{ steps.tags.outputs.version }}" --generate-notes --latest
