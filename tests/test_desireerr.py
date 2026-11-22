@@ -1465,26 +1465,6 @@ class SettingsChecks(Base):
         self.assertEqual((out["app_url"], out["notify_events"], out["notify_discreet"], out["stall_days"]),
                          ("https://x.example", ["available"], False, 365))
 
-    def test_update_channel_only_under_torrent_box(self):
-        self.app.whisparr.routes[("GET", "qualityprofile")] = []
-        with unittest.mock.patch.dict(os.environ, {"DESIREERR_IMAGE": ""}):
-            self.assertIsNone(self.app.public_settings()["update"])
-            with self.assertRaises(d.ApiError):
-                self.app.save_settings({"update_channel": "edge"})
-        image = "ghcr.io/vibesclauder/desireerr:latest"
-        with unittest.mock.patch.dict(os.environ, {"DESIREERR_IMAGE": image}):
-            self.assertEqual(self.app.public_settings()["update"],
-                             {"running": "release", "checkout": False, "changeable": True, "wanted": "release"})
-            out = self.app.save_settings({"update_channel": "edge"})["update"]
-            self.assertEqual((out["running"], out["wanted"]), ("release", "edge"))  # next, within the hour
-            self.assertEqual((self.app.data_dir / "update-channel").read_text(), "edge\n")
-            with self.assertRaises(d.ApiError):
-                self.app.save_settings({"update_channel": "nightly"})
-        with unittest.mock.patch.dict(os.environ, {"DESIREERR_IMAGE": "torrent-box/desireerr"}):  # local build
-            self.assertFalse(self.app.public_settings()["update"]["changeable"])
-            with self.assertRaises(d.ApiError):
-                self.app.save_settings({"update_channel": "release"})
-
     def test_old_databases_get_the_new_columns(self):
         path = Path(self.tmp.name) / "old.db"
         import sqlite3

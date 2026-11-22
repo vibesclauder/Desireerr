@@ -2025,16 +2025,6 @@ async function viewSettings(view, ctx) {
       </form>
       <p class="lede" style="margin:0">Shown in tabs, bookmarks and the sign-in page. Set something neutral if others see your screen.</p>
     </section>`);
-    if (s.update) parts.push(html`<section class="panel">
-      <h2>Updates</h2>
-      ${s.update.changeable ? html`<p class="lede">Which version torrent-box keeps Desireerr on: <b>release</b>, a version once it's released, or <b>edge</b>, the work in progress, with changes before they're tried out and now and then a bug. It switches within the hour.</p>
-      <form class="form-grid" id="up-form">
-        <label class="field"><span>Follow</span><select class="input" name="update_channel">${option("release", "Releases", s.update.wanted)}${option("edge", "Edge (experimental)", s.update.wanted)}</select></label>
-        <div class="btns" style="align-self:end"><button class="btn primary">Save</button></div>
-      </form>
-      ${s.update.wanted !== s.update.running ? html`<p class="note">Now running ${s.update.running}; ${s.update.wanted} is next.</p>` : ""}`
-      : html`<p class="lede">${s.update.checkout ? "A checkout of Desireerr runs, not an image." : "A build of a checkout runs, not a published image."} torrent-box's <code>./setup_helper.py desireerr release</code> goes back to the releases.</p>`}
-    </section>`);
     parts.push(html`<section class="panel" style="max-width:none">
       <h2>Users</h2>
       <p class="lede">Admins approve requests and change settings. Auto-approved users' requests go straight to Whisparr; everyone else's wait for an admin.</p>
@@ -2091,11 +2081,6 @@ async function viewSettings(view, ctx) {
     notify_events: $$("input[name=ev]:checked", form).map((x) => x.value), notify_discreet: form.notify_discreet.checked,
   } });
   submit("#nt-form", async (form) => { await saveNotify(form); toast("Saved."); });
-  submit("#up-form", async (form) => {
-    await api("settings", { method: "PUT", body: { update_channel: form.update_channel.value } });
-    toast("Saved. It switches within the hour.");
-    render();
-  });
   if ($("#nt-test", view)) $("#nt-test", view).onclick = async (e) => {
     const b = e.currentTarget;
     b.classList.add("busy");
