@@ -153,7 +153,8 @@ TASTE_POOL = 500             # sorted by taste: this many of the newest matching
 # The taste chip's steps come from the user's own scores on those newest scenes: the top 2% is
 # very warm, the next 8% warm, the bottom 10% cool and the lowest 2% cold, but no lower or
 # higher than these floors, for a profile that gives most scenes the same score. Measured
-# again every SCALE_TTL (and when the user's feelings change); SCALE_RETRY after a failure.
+# again every SCALE_TTL (and when the user's feelings change), in the background; SCALE_RETRY
+# after a failure.
 SCALE_FLOORS = {"cold": -5, "cool": -1, "warm": 4, "hot": 8}
 SCALE_SHARES = {"cold": 0.02, "cool": 0.10, "warm": 0.90, "hot": 0.98}
 SCALE_MIN_SAMPLE = 100
@@ -1425,9 +1426,11 @@ def taste_cutoffs(scores):
 
 def taste_tier(score, cut):
     """Which step of the taste chip a SCORE is, by CUT (taste_cutoffs): hated (None), cold,
-    cool, mid, zero, warm or hot."""
+    cool, mid, zero, warm or hot; None for a score without a CUT yet (the chip stays plain)."""
     if score is None:
         return "hated"
+    if cut is None:
+        return None
     if score <= cut["cold"]:
         return "cold"
     if score <= cut["cool"]:
@@ -1566,7 +1569,11 @@ class App:
         self.discover_cache = {}  # user id -> (when made, {row key: row}), see discover
         self.discover_lock = threading.Lock()
         self.scales = {}         # user ID -> the taste chip's steps and until when (taste_scale)
+        self.scale_gen = {}      # user ID -> how often their feelings changed (a measure in flight)
+        self.scale_running = set()
         self.scale_lock = threading.Lock()
+        self.scale_threads = {}
+        self.background_scales = True   # False: only measure_scale measures (tests)
         self.rare = None         # tag id -> rarity, from tag_scenes (see count_tags)
         self.kinds = (0, {})     # (when asked, tag id -> kind), see kind_tags
         self.nfo_error = ""
@@ -2254,10 +2261,14 @@ class App:
         with self.discover_lock:
             if user:
                 self.discover_cache.pop(user["id"], None)
-                self.scales.pop(user["id"], None)  # the chip's steps too: measured again
+                ids = [user["id"]]
             else:
                 self.discover_cache.clear()
-                self.scales.clear()
+                ids = list(self.scales)
+        for uid in ids:  # the chip's steps: kept until measured anew, in the background
+            self.scale_gen[uid] = self.scale_gen.get(uid, 0) + 1
+            if uid in self.scales:
+                self.scales[uid]["until"] = 0
 
     def new_with_favourites(self, user, ttl=300):
         """Discover's row: the newest scenes with the favourite performers (see
@@ -2733,24 +2744,42 @@ class App:
         return {p: 1 - 0.5 ** (n / 2) for p, n in sums.items()}
 
     def taste_scale(self, user):
-        """The user's taste chip steps (taste_cutoffs), measured on first use and then kept
-        until their feelings change (forget_discover) or SCALE_TTL; the floors if StashDB can't
-        be asked."""
+        """The user's taste chip steps (taste_cutoffs), or None while there are none yet: they
+        come from StashDB's newest scenes, which can take a few seconds, so they're measured in
+        the background (measure_scale) and the chip stays plain until they are in. Steps that
+        are old, or made before the user's feelings changed, serve until the new ones are in."""
         if not user:
-            return dict(SCALE_FLOORS)
+            return None
         entry = self.scales.get(user["id"])
-        if entry and entry["until"] > now():
-            return entry["cut"]
+        if not entry or entry["until"] <= now():
+            self.start_measuring(user)
+        return entry["cut"] if entry else None
+
+    def start_measuring(self, user):
         with self.scale_lock:
-            entry = self.scales.get(user["id"])
-            if entry and entry["until"] > now():
-                return entry["cut"]
+            if user["id"] in self.scale_running or not self.background_scales:
+                return
+            self.scale_running.add(user["id"])
+        thread = threading.Thread(target=self.measure_scale, args=(user,), daemon=True)
+        self.scale_threads[user["id"]] = thread
+        thread.start()
+
+    def measure_scale(self, user):
+        """Measure the user's taste chip steps now and keep them. If StashDB can't be asked,
+        the old ones (or none) stay, and it's tried again after SCALE_RETRY."""
+        uid = user["id"]
+        gen = self.scale_gen.get(uid, 0)
+        self.scale_running.add(uid)
+        try:
             try:
                 cut, ttl = taste_cutoffs(self.sample_scores(user)), SCALE_TTL
             except ApiError:
-                cut, ttl = dict(SCALE_FLOORS), SCALE_RETRY
-            self.scales[user["id"]] = {"cut": cut, "until": now() + ttl}
-            return cut
+                cut, ttl = (self.scales.get(uid) or {}).get("cut"), SCALE_RETRY
+            if self.scale_gen.get(uid, 0) != gen:
+                ttl = 0  # feelings changed meanwhile: these are measured on the old ones
+            self.scales[uid] = {"cut": cut, "until": now() + ttl}
+        finally:
+            self.scale_running.discard(uid)
 
     def sample_scores(self, user):
         """The user's taste scores for the newest TASTE_POOL scenes they'd see (the pool

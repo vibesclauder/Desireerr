@@ -101,6 +101,7 @@ def make_app(tmp, routes=None):
     app.whisparr.index_time = app.whisparr.queue_time = 9e18  # never refresh on its own
     app.stash = FakeStash({SCENE: scene(), OTHER: scene(OTHER)})
     app.notify.background = False
+    app.background_scales = False   # tests measure when they want to (measure_scale)
     app.pushes = []
     app.notify.post = lambda server, body: app.pushes.append((server, body)) or True
     return app
@@ -1604,24 +1605,55 @@ class Taste(Base):
         self.assertIsNone(flame(["love"], ["loved", "hated"]))
         self.assertIsNone(flame(["love"], []))
 
-    def test_cards_carry_tier_and_flame(self):
+    def test_cards_are_plain_until_the_scale_is_measured(self):
         got = {x["id"]: x for x in self.app.browse_scenes({}, self.user)["scenes"]}
-        self.assertEqual(got["s1"]["taste_tier"], "warm")          # 4: the floors, this tiny feed being
-        self.assertEqual(got["s3"]["taste_tier"], "hated")         # a thin sample
+        self.assertEqual([x["taste_tier"] for x in got.values()], [None, None, "hated", None, None])  # plain
+        self.assertEqual(got["s1"]["taste"], 4)                      # the points are there at once
+        self.app.measure_scale(self.user)
+        got = {x["id"]: x for x in self.app.browse_scenes({}, self.user)["scenes"]}
+        self.assertEqual(got["s1"]["taste_tier"], "warm")            # 4: the floors, this tiny feed being
+        self.assertEqual(got["s3"]["taste_tier"], "hated")           # a thin sample
         self.assertEqual(got["s2"]["taste_tier"], "cool")
         self.assertIsNone(got["s1"]["taste_fire"])
 
-    def test_scale_is_measured_once_and_again_after_a_change(self):
+    def test_scale_is_measured_in_the_background(self):
+        self.app.background_scales = True
         self.app.stash.queries.clear()
-        first = self.app.taste_scale(self.user)
+        self.assertIsNone(self.app.taste_scale(self.user))           # asked: nothing yet, no waiting
+        self.app.scale_threads[self.user["id"]].join(10)
+        cut = self.app.taste_scale(self.user)
+        self.assertEqual(cut, d.taste_cutoffs(self.app.sample_scores(self.user)))
         asked = len(self.app.stash.queries)
-        self.assertGreater(asked, 0)
-        self.assertEqual(self.app.taste_scale(self.user), first)
-        self.assertEqual(len(self.app.stash.queries), asked)       # kept
-        self.app.set_tag_feeling(self.user, "like", "love")        # feelings changed: measured anew
-        self.app.taste_scale(self.user)
-        self.assertGreater(len(self.app.stash.queries), asked)
-        self.assertEqual(self.app.taste_scale(None), d.SCALE_FLOORS)
+        self.assertEqual(self.app.taste_scale(self.user), cut)
+        self.assertEqual(len(self.app.stash.queries), asked)         # kept, nothing asked again
+
+    def test_old_steps_serve_while_new_ones_are_measured(self):
+        self.app.measure_scale(self.user)
+        old = self.app.taste_scale(self.user)
+        self.assertIsNotNone(old)
+        self.app.set_tag_feeling(self.user, "like", "love")          # feelings changed
+        self.assertEqual(self.app.taste_scale(self.user), old)       # the old ones serve meanwhile
+        self.assertLessEqual(self.app.scales[self.user["id"]]["until"], d.now())   # but are due
+        self.assertEqual(self.app.taste_scale(None), None)
+
+    def test_a_measure_that_saw_old_feelings_is_not_kept(self):
+        real = self.app.sample_scores
+        def sample(user):
+            scores = real(user)
+            self.app.set_tag_feeling(self.user, "like", "love")      # changed while it was measuring
+            return scores
+        self.app.sample_scores = sample
+        self.app.measure_scale(self.user)
+        self.assertLessEqual(self.app.scales[self.user["id"]]["until"], d.now())
+
+    def test_a_failed_measure_keeps_what_there_is(self):
+        self.app.measure_scale(self.user)
+        old = self.app.scales[self.user["id"]]["cut"]
+        self.app.scales[self.user["id"]]["until"] = 0
+        self.app.sample_scores = lambda user: (_ for _ in ()).throw(d.ApiError(502, "StashDB is down"))
+        self.app.measure_scale(self.user)
+        self.assertEqual(self.app.taste_scale(self.user), old)
+        self.assertGreater(self.app.scales[self.user["id"]]["until"], d.now())      # tried again later
 
     def test_sorted_by_taste(self):
         out = self.app.browse_scenes({"sort": "TASTE", "performers": "aaaaaaaa-1", "per_page": "2"}, self.user)

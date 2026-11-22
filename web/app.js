@@ -569,15 +569,16 @@ function progressBar(st) {
 const noImg = (ic = "film") => html`<div class="noimg">${icon(ic)}</div>`;
 
 // The taste chip: the score on a step of the user's own scale (taste_tier: cold, cool, typical,
-// warm, very warm, from the server), the icon a flame when the scene is a match with a performer
-// they want (taste_fire: hi for a loved one, lo for a liked one), a snowflake below zero.
+// warm, very warm, from the server, which measures it in the background: until then the plain
+// chip), the icon a flame when the scene is a match with a performer they want (taste_fire: hi
+// for a loved one, lo for a liked one), a snowflake below zero.
 const TIER_WORDS = { hot: "Very warm", warm: "Warm", mid: "Some overlap", zero: "Nothing known", cool: "Not your thing", cold: "Really not for you" };
 const FLAME_WORDS = { hi: "Perfect match: a loved performer and a loved tag, nothing you dislike", lo: "Good match: a liked performer and a loved tag, nothing you dislike" };
 function tasteChip(s, why = "Your taste: what its tags and performers add by how you feel about them") {
   if (s.hated || s.taste === null) return html`<span class="points hated" title="It has a tag or performer you hate">${icon("ban")}</span>`;
   if (s.taste == null) return "";
-  const tier = s.taste_tier || "mid";
-  const ic = s.taste_fire ? icon("flame", `fl ${s.taste_fire}`) : s.taste < 0 ? icon("snow") : icon("sparkle");
+  const tier = s.taste_tier || "";  // none while the server measures the user's scale: the plain chip
+  const ic = s.taste_fire ? icon("flame", `fl ${s.taste_fire}`) : tier && s.taste < 0 ? icon("snow") : icon("sparkle");
   const title = [s.taste_fire ? FLAME_WORDS[s.taste_fire] : TIER_WORDS[tier], why].filter(Boolean).join(". ");
   return html`<span class="points ${tier}" title="${title}">${ic}${s.taste}</span>`;
 }
