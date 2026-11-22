@@ -1,5 +1,6 @@
 # Releases: a merge to main publishes the image (latest, and the version in desireerr.py);
-# a push to dev publishes the experimental one (dev). Tests have to pass first.
+# a push to dev publishes the experimental one (dev). Tests have to pass first, and a version
+# that's published already can't be published again.
 name: image
 
 on:
@@ -23,6 +24,10 @@ jobs:
           image=ghcr.io/${GITHUB_REPOSITORY,,}
           if [ "$GITHUB_REF_NAME" = main ]; then
             version=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' desireerr.py)
+            if docker manifest inspect "$image:$version" >/dev/null 2>&1; then
+              echo "::error::$image:$version is published already: bump VERSION in desireerr.py before merging to main"
+              exit 1
+            fi
             echo "tags=$image:latest,$image:$version" >>"$GITHUB_OUTPUT"
           else
             echo "tags=$image:dev" >>"$GITHUB_OUTPUT"

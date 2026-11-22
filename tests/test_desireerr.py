@@ -1,3 +1,4 @@
+import contextlib
 import http.client
 import json
 import os
@@ -831,6 +832,17 @@ class Http(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.port = self.server.server_address[1]
         self.cookie = None
+
+    def test_a_hung_up_client_prints_no_traceback(self):
+        import io
+        for error, printed in ((BrokenPipeError(), False), (ConnectionResetError(), False), (ValueError("bug"), True)):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                try:
+                    raise error
+                except Exception:
+                    self.server.handle_error(None, ("::1", 1))
+            self.assertEqual("Traceback" in err.getvalue(), printed, error)
 
     def tearDown(self):
         self.server.shutdown()

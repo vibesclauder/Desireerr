@@ -39,7 +39,7 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.4"
+VERSION = "1.5"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
@@ -3606,6 +3606,13 @@ class Server(ThreadingHTTPServer):
     def __init__(self, addr, handler, app):
         self.app = app
         super().__init__(addr, handler)
+
+    def handle_error(self, request, client_address):
+        """A client that hangs up, or speaks something that isn't HTTP (a port scan, TLS to
+        a plain port), isn't ours to print a traceback for; anything else still is."""
+        if isinstance(sys.exc_info()[1], OSError):
+            return
+        super().handle_error(request, client_address)
 
 
 class DualStackServer(Server):
