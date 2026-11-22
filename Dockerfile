@@ -1,7 +1,8 @@
-# Desireerr in a container. No registry: torrent-box builds this straight from the repo
-#   docker build -t desireerr https://github.com/vibesclauder/desireerr.git#main
-# and again every week, so a push to main is all a new version needs. Standard library only.
+# Desireerr in a container. GitHub Actions (.github/workflows/image.yml) publishes it to
+# ghcr.io/vibesclauder/desireerr: latest on a merge to main, dev on a push to dev.
+# Standard library only.
 FROM python:3.14-slim
+LABEL org.opencontainers.image.source=https://github.com/vibesclauder/desireerr
 COPY desireerr.py /app/
 COPY web /app/web
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DESIREERR_DATA=/data DESIREERR_CACHE=/cache
