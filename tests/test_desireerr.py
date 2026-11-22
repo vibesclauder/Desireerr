@@ -899,7 +899,7 @@ class Http(unittest.TestCase):
         self.assertEqual(self.req("GET", "/static/app.js")[0], 200)
         self.assertEqual(self.req("GET", "/static/../desireerr.py")[0], 404)
 
-    def test_only_the_start_page_on_the_same_host_frames_it(self):
+    def test_nothing_frames_it_unless_allowed(self):
         def headers(path, host):
             conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
             conn.request("GET", path, headers={"Host": host})
@@ -907,14 +907,21 @@ class Http(unittest.TestCase):
             resp.read()
             conn.close()
             return resp.getheader("Content-Security-Policy") or "", resp.getheader("X-Frame-Options")
-        csp, xfo = headers("/", "box.example:5056")
-        self.assertIn("frame-ancestors http://box.example:*;", csp + ";")
-        self.assertIsNone(xfo)
-        self.assertIn("frame-ancestors http://[fd00::1]:*", headers("/", "[fd00::1]:5056")[0])
-        self.assertIn("frame-ancestors 'none'", headers("/", "bad host")[0])
-        self.assertIn("frame-ancestors http://box.tail1234.ts.net:* http://*.tail1234.ts.net:*;",
-                      headers("/", "box.tail1234.ts.net:15056")[0] + ";")
-        self.assertEqual(headers("/api/status", "box.example:5056")[1], "DENY")
+        with unittest.mock.patch.dict(os.environ, {"DESIREERR_FRAME_ANCESTORS": ""}):
+            csp, xfo = headers("/", "box.example:5056")
+            self.assertTrue(csp.endswith("frame-ancestors 'none'"), csp)  # the default
+            self.assertIsNone(xfo)
+        with unittest.mock.patch.dict(os.environ, {"DESIREERR_FRAME_ANCESTORS": "same-host"}):
+            self.assertIn("frame-ancestors http://box.example:*;", headers("/", "box.example:5056")[0] + ";")
+            self.assertIn("frame-ancestors http://[fd00::1]:*", headers("/", "[fd00::1]:5056")[0])
+            self.assertIn("frame-ancestors 'none'", headers("/", "bad host")[0])
+            self.assertIn("frame-ancestors http://box.tail1234.ts.net:* http://*.tail1234.ts.net:*;",
+                          headers("/", "box.tail1234.ts.net:15056")[0] + ";")
+            self.assertEqual(headers("/api/status", "box.example:5056")[1], "DENY")
+        with unittest.mock.patch.dict(os.environ, {"DESIREERR_FRAME_ANCESTORS":
+                                                   "https://start.example, http://*.lan:* nonsense; x"}):
+            self.assertIn("frame-ancestors https://start.example http://*.lan:*;",
+                          headers("/", "box.example:5056")[0] + ";")  # only origins get through
 
     def test_users_cannot_reach_admin_routes(self):
         self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})

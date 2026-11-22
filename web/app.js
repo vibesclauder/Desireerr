@@ -312,9 +312,8 @@ document.addEventListener("click", (e) => {
 });
 window.addEventListener("popstate", () => { popped = true; render(); });
 
-// In torrent-box's start page frame, the address bar is the start page's: it's told where we
-// are, so a reload or a bookmark opens this page again. Only the start page may frame us
-// (frame-ancestors), and a path is all it gets.
+// Framed (only where DESIREERR_FRAME_ANCESTORS allows it), the page around us may keep our
+// address in its own, so a reload or a bookmark opens this page again. A path is all it gets.
 if (window.parent !== window) {
   const tell = () => window.parent.postMessage({ at: location.pathname + location.search + location.hash }, "*");
   for (const name of ["pushState", "replaceState"]) {

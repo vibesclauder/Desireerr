@@ -136,6 +136,12 @@ sudo ufw allow in on tailscale0 to any port 5056 proto tcp comment 'Desireerr'
 
 On a phone, open it and "Add to home screen" for an app icon.
 
+**Framing.** No other page may show Desireerr in a frame (a dashboard that embeds its apps,
+say) unless `DESIREERR_FRAME_ANCESTORS` allows it: origins apart by spaces or commas
+(`https://start.example http://*.lan:*`), and `same-host` for any page on the host Desireerr
+was reached by, on any port. An embedding page that wants to follow Desireerr's address
+gets its path in a message.
+
 ## How requests reach Whisparr
 
 - **Request a scene:** if Whisparr already has it (unmonitored, say from a performer's back

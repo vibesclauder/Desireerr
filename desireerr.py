@@ -3173,6 +3173,11 @@ def pick_image(images, landscape=True):
 # ---------------------------------------------------------------------------------------
 
 FRAMING_HOST = re.compile(r"\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*")
+FRAME_ORIGIN = re.compile(r"https?://(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::(?:\d+|\*))?")
+
+
+def frame_ancestor_names():
+    return os.environ.get("DESIREERR_FRAME_ANCESTORS", "").replace(",", " ").split()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3314,16 +3319,24 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def frame_ancestors(self):
-        """Only a page on the same host (torrent-box's start page) may show it in a frame,
-        under its bar back to the start page. On a Tailscale name, any name of the same tailnet:
-        the start page may have one of its own (a Tailscale Service), without this app's port."""
+        """No page may show Desireerr in a frame, unless DESIREERR_FRAME_ANCESTORS (names,
+        space or comma apart) allows it: origins (https://start.example, http://*.lan:*),
+        and "same-host" for a page on the host this one was reached by, on any port."""
+        wanted = frame_ancestor_names()
+        origins = [w for w in wanted if FRAME_ORIGIN.fullmatch(w)]
+        if "same-host" in wanted:
+            origins += self.same_host_origins()
+        return "frame-ancestors " + (" ".join(origins) or "'none'")
+
+    def same_host_origins(self):
+        """The host's other ports. On a Tailscale name, any name of the same tailnet too: a
+        page there may have a name of its own (a Tailscale Service), without this app's port."""
         host = (self.headers.get("Host") or "").strip()
         host = re.sub(r":\d+$", "", host) if not host.endswith("]") else host
         if not FRAMING_HOST.fullmatch(host):
-            return "frame-ancestors 'none'"
+            return []
         tailnet = re.fullmatch(r"[^.]+\.([A-Za-z0-9-]+\.ts\.net)", host, re.IGNORECASE)
-        also = f" http://*.{tailnet[1]}:*" if tailnet else ""
-        return f"frame-ancestors http://{host}:*{also}"
+        return [f"http://{host}:*"] + ([f"http://*.{tailnet[1]}:*"] if tailnet else [])
 
     def image(self, query):
         user = self.app.session_user(self.cookie(SESSION_COOKIE))
@@ -3803,6 +3816,10 @@ def main(argv=None):
         threading.Thread(target=tag_counter, args=(app,), daemon=True).start()
     cls = DualStackServer if ":" in args.bind else Server
     server = cls((args.bind, args.port), Handler, app)
+    for name in frame_ancestor_names():
+        if name != "same-host" and not FRAME_ORIGIN.fullmatch(name):
+            print(f"DESIREERR_FRAME_ANCESTORS: ignoring '{name}' (an origin like https://start.example, or same-host)",
+                  flush=True)
     print(f"Desireerr {VERSION} on port {args.port}", flush=True)
     try:
         server.serve_forever()
