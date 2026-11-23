@@ -9,7 +9,7 @@ self.addEventListener("push", (e) => {
     body: d.body || "",
     tag: d.tag || undefined,
     icon: "/static/icon-192.png",
-    badge: "/static/icon-192.png",
+    badge: "/static/badge-96.png",
     data: { url: d.url || "/" },
   }));
 });

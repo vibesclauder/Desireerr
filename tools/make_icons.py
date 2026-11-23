@@ -110,6 +110,20 @@ def render(size, rounded):
     return bytes(out)
 
 
+def render_badge(size):
+    """The flame with the heart cut out, white on transparent: Android's status-bar badge
+    uses only the alpha, so a coloured tile would show as a white square."""
+    flame = coverage(flatten(FLAME), size)
+    heart = coverage(flatten(HEART, HEART_XFORM), size)
+    out = bytearray()
+    for y in range(size):
+        out.append(0)
+        for x in range(size):
+            i = y * size + x
+            out += bytes((255, 255, 255, round(255 * min(1.0, flame[i]) * (1 - min(1.0, heart[i])))))
+    return bytes(out)
+
+
 def png(size, pixels):
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
@@ -123,6 +137,8 @@ def main():
                                 ("icon-512.png", 512, True)):
         (WEB / name).write_bytes(png(size, render(size, rounded)))
         print("wrote", WEB / name)
+    (WEB / "badge-96.png").write_bytes(png(96, render_badge(96)))
+    print("wrote", WEB / "badge-96.png")
 
 
 if __name__ == "__main__":
