@@ -39,7 +39,7 @@ from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 USER_AGENT = f"Desireerr/{VERSION}"
 STASHDB_URL = "https://stashdb.org/graphql"
 STASHDB_WEB = "https://stashdb.org"
@@ -287,6 +287,15 @@ CREATE TABLE IF NOT EXISTS users (
     pw_hash TEXT NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0,
     auto_approve INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_subs (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
     created INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -963,6 +972,7 @@ class Notifier:
         self.db = db
         self.error = ""          # the last push's trouble, for Settings
         self.background = True   # tests push in the same thread
+        self.web = WebPush(db)
 
     def target(self, s=None):
         s = s or self.db.settings()
@@ -1027,12 +1037,21 @@ class Notifier:
         """Push in the background, if this event is switched on and there's a topic."""
         s = self.db.settings()
         if event in s["notify_events"].split(","):
-            self.push(s, self.payload(event, req, s, extra))
+            payload = self.payload(event, req, s, extra)
+            self.push(s, payload)
+            path = "/requests" if s["notify_discreet"] == "1" else f"/scene/{req['scene_id']}"
+            for uid in self.web.audience(event, req):
+                self.web.send(uid, payload["title"], payload["message"], path,
+                              f"request-{req['id']}", self.background)
 
     def send_stalled(self, rows):
         s = self.db.settings()
         if "stalled" in s["notify_events"].split(","):
             self.push(s, self.stalled_payload(rows, s))
+            for uid, mine in self.web.stalled_audience(rows).items():
+                payload = self.stalled_payload(mine, s)
+                self.web.send(uid, payload["title"], payload["message"], "/requests?filter=stalled",
+                              "stalled", self.background)
 
     def push(self, s, payload):
         server, topic = self.target(s)
@@ -1074,6 +1093,214 @@ class Notifier:
             return True
         print(f"notify: {self.error}", file=sys.stderr, flush=True)
         return False
+
+
+# ---------------------------------------------------------------------------------------
+# Web Push: notifications on the devices where Desireerr is installed
+# ---------------------------------------------------------------------------------------
+
+# Where a browser's push service lives; the server only ever posts to these, never to an
+# address a user typed in.
+PUSH_HOSTS = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com",
+              ".notify.windows.com")
+PUSH_DEVICES = 10      # per user
+
+
+def b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def unb64url(text):
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def push_crypto():
+    """The `cryptography` package, which Web Push's encryption needs (the Docker image has
+    it); None without it, and Desireerr then offers no push to devices."""
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    except ImportError:
+        return None
+    return {"hashes": hashes, "serialization": serialization, "ec": ec, "AESGCM": AESGCM,
+            "HKDF": HKDF, "decode_dss_signature": decode_dss_signature}
+
+
+class WebPush:
+    """Push notifications to the devices people subscribed in Settings (RFC 8030 push, RFC
+    8291 encryption, RFC 8292 VAPID). Who hears what: an admin hears of requests waiting and
+    failing, the person who asked hears how their request went."""
+
+    def __init__(self, db):
+        self.db = db
+        self.c = push_crypto()
+        self.key = None
+
+    @property
+    def supported(self):
+        return self.c is not None
+
+    def private_key(self):
+        """The server's VAPID key, made on first use and kept in the settings."""
+        if self.key is None:
+            ec = self.c["ec"]
+            saved = self.db.setting("vapid_key")
+            if saved:
+                self.key = ec.derive_private_key(int.from_bytes(unb64url(saved), "big"), ec.SECP256R1())
+            else:
+                self.key = ec.generate_private_key(ec.SECP256R1())
+                raw = self.key.private_numbers().private_value.to_bytes(32, "big")
+                self.db.set_settings({"vapid_key": b64url(raw)})
+        return self.key
+
+    def public_key(self):
+        """What a browser subscribes with: the VAPID public key, an uncompressed point."""
+        sr = self.c["serialization"]
+        return b64url(self.private_key().public_key().public_bytes(
+            sr.Encoding.X962, sr.PublicFormat.UncompressedPoint))
+
+    @staticmethod
+    def endpoint_ok(url):
+        try:
+            parts = urllib.parse.urlsplit(url)
+            host = (parts.hostname or "").lower()
+            return (parts.scheme == "https" and not parts.username and not parts.port
+                    and any(host.endswith(h) for h in PUSH_HOSTS))
+        except ValueError:
+            return False
+
+    # who
+    def admins(self):
+        return {r["id"] for r in self.db.all("SELECT id FROM users WHERE is_admin = 1")}
+
+    def audience(self, event, req):
+        """The users to push an event to (not the one who just did it themselves)."""
+        ids = set()
+        if event in ("pending", "failed"):
+            ids |= self.admins()
+        if event in ("auto", "watch", "approved", "declined", "available", "failed") and req.get("user_id"):
+            ids.add(req["user_id"])
+        if event in ("approved", "declined", "failed", "auto"):
+            ids.discard(req.get("decided_by"))
+        return ids
+
+    def stalled_audience(self, rows):
+        """Admins hear of every stalled request, the others of their own."""
+        out = {uid: list(rows) for uid in self.admins()}
+        for r in rows:
+            if r.get("user_id") and r["user_id"] not in out:
+                out.setdefault(r["user_id"], []).append(r)
+        return {uid: mine for uid, mine in out.items() if mine}
+
+    # devices
+    def devices(self, user_id):
+        return self.db.all("SELECT id, endpoint, label, created FROM push_subs WHERE user_id = ? "
+                           "ORDER BY created", (user_id,))
+
+    def subscribe(self, user_id, body):
+        endpoint = str(body.get("endpoint") or "")
+        keys = body.get("keys") or {}
+        p256dh, auth = str(keys.get("p256dh") or ""), str(keys.get("auth") or "")
+        if not self.endpoint_ok(endpoint):
+            raise ApiError(400, "That isn't a push service address this browser's vendor is known by.")
+        try:
+            if len(unb64url(p256dh)) != 65 or len(unb64url(auth)) != 16:
+                raise ValueError
+        except ValueError:
+            raise ApiError(400, "The subscription's keys aren't valid.") from None
+        label = re.sub(r"\s+", " ", str(body.get("label") or "")).strip()[:60]
+        with self.db.lock:
+            mine = self.devices(user_id)
+            if len(mine) >= PUSH_DEVICES and not any(m["endpoint"] == endpoint for m in mine):
+                raise ApiError(400, f"{PUSH_DEVICES} devices is the most. Remove one first.")
+            self.db.run(
+                "INSERT INTO push_subs(user_id, endpoint, p256dh, auth, label, created) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, "
+                "p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label",
+                (user_id, endpoint, p256dh, auth, label, now()))
+
+    def remove(self, user_id, device_id):
+        self.db.run("DELETE FROM push_subs WHERE id = ? AND user_id = ?", (device_id, user_id))
+
+    # sending
+    def encrypt(self, sub, data):
+        """The body of a push, aes128gcm (RFC 8291) for a subscription's keys."""
+        c = self.c
+        ec, hashes, sr = c["ec"], c["hashes"], c["serialization"]
+        ua_public = unb64url(sub["p256dh"])
+        ephemeral = ec.generate_private_key(ec.SECP256R1())
+        as_public = ephemeral.public_key().public_bytes(sr.Encoding.X962, sr.PublicFormat.UncompressedPoint)
+        shared = ephemeral.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(
+            ec.SECP256R1(), ua_public))
+        ikm = c["HKDF"](hashes.SHA256(), 32, unb64url(sub["auth"]),
+                        b"WebPush: info\0" + ua_public + as_public).derive(shared)
+        salt = os.urandom(16)
+        key = c["HKDF"](hashes.SHA256(), 16, salt, b"Content-Encoding: aes128gcm\0").derive(ikm)
+        nonce = c["HKDF"](hashes.SHA256(), 12, salt, b"Content-Encoding: nonce\0").derive(ikm)
+        sealed = c["AESGCM"](key).encrypt(nonce, data + b"\x02", None)
+        return salt + (4096).to_bytes(4, "big") + bytes([len(as_public)]) + as_public + sealed
+
+    def vapid(self, endpoint):
+        """The Authorization header that tells the push service who is pushing (RFC 8292)."""
+        c = self.c
+        parts = urllib.parse.urlsplit(endpoint)
+        s = self.db.settings()
+        app_url = (s.get("app_url") or "").rstrip("/")
+        claims = {"aud": f"{parts.scheme}://{parts.netloc}", "exp": int(time.time()) + 12 * 3600,
+                  "sub": app_url if app_url.startswith("https://") else "https://github.com/vibesclauder/Desireerr"}
+        head = b64url(json.dumps({"typ": "JWT", "alg": "ES256"}).encode())
+        text = f"{head}.{b64url(json.dumps(claims).encode())}"
+        r, sg = c["decode_dss_signature"](self.private_key().sign(
+            text.encode(), c["ec"].ECDSA(c["hashes"].SHA256())))
+        return f"vapid t={text}.{b64url(r.to_bytes(32, 'big') + sg.to_bytes(32, 'big'))}, k={self.public_key()}"
+
+    def send(self, user_id, title, message, path, tag, background=True):
+        """Push a notification to all of a user's devices."""
+        if not self.supported or not self.devices(user_id):
+            return
+        data = json.dumps({"title": title, "body": message, "url": path, "tag": tag}).encode()
+        for sub in self.db.all("SELECT * FROM push_subs WHERE user_id = ?", (user_id,)):
+            if background:
+                threading.Thread(target=self.deliver, args=(sub, data), daemon=True).start()
+            else:
+                self.deliver(sub, data)
+
+    def deliver(self, sub, data):
+        """One push; a device the browser has forgotten (404, 410) is dropped. The reason
+        for a failure, or "" when it went through."""
+        try:
+            req = urllib.request.Request(
+                sub["endpoint"], data=self.encrypt(sub, data), method="POST",
+                headers={"Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+                         "TTL": str(24 * 3600), "Urgency": "normal", "User-Agent": USER_AGENT,
+                         "Authorization": self.vapid(sub["endpoint"])})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp.read()
+            return ""
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                self.db.run("DELETE FROM push_subs WHERE id = ?", (sub["id"],))
+                return "The device has unsubscribed."
+            reason = f"The push service answered {e.code}."
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            reason = f"Can't reach the push service ({getattr(e, 'reason', e)})."
+        print(f"web push: {reason}", file=sys.stderr, flush=True)
+        return reason
+
+    def test(self, user_id):
+        devices = self.db.all("SELECT * FROM push_subs WHERE user_id = ?", (user_id,))
+        if not devices:
+            raise ApiError(400, "No device is subscribed yet.")
+        s = self.db.settings()
+        title = s["tab_title"] or "Desireerr"
+        data = json.dumps({"title": title, "body": "This is a test.", "url": "/settings",
+                           "tag": "test"}).encode()
+        errors = [e for e in (self.deliver(sub, data) for sub in devices) if e]
+        if len(errors) == len(devices):
+            raise ApiError(502, errors[0])
 
 
 # ---------------------------------------------------------------------------------------
@@ -3434,6 +3661,9 @@ class Handler(BaseHTTPRequestHandler):
     def static(self, path):
         if path in ("/favicon.ico",):
             path = "/static/favicon.svg"
+        if path == "/sw.js":   # at the root, so its scope is the whole app
+            self.send(200, (WEB_DIR / "sw.js").read_bytes(), "text/javascript", {"Cache-Control": "no-cache"})
+            return
         if path.startswith("/static/"):
             rel = path[len("/static/"):]
             target = (WEB_DIR / rel).resolve()
@@ -3722,6 +3952,23 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "Keep at least one admin.")
                 app.db.run("DELETE FROM users WHERE id = ?", (uid,))
                 return 200, {"users": app.users()}, None
+        if parts[:1] == ["push"]:
+            web = app.notify.web
+            if method == "GET" and len(parts) == 1:
+                return 200, {"supported": web.supported,
+                             "key": web.public_key() if web.supported else "",
+                             "devices": web.devices(user["id"])}, None
+            if not web.supported:
+                raise ApiError(400, "Push to devices needs the cryptography package.")
+            if method == "POST" and len(parts) == 1:
+                web.subscribe(user["id"], self.body_json())
+                return 200, {"devices": web.devices(user["id"])}, None
+            if method == "POST" and parts[1:] == ["test"]:
+                web.test(user["id"])
+                return 200, {"ok": True}, None
+            if method == "DELETE" and len(parts) == 2 and parts[1].isdigit():
+                web.remove(user["id"], int(parts[1]))
+                return 200, {"devices": web.devices(user["id"])}, None
         if key == ("GET", "settings"):
             admin()
             return 200, app.public_settings(), None

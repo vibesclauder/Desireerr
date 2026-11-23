@@ -555,3 +555,6 @@ body.hide-covers .card:hover .thumb img, body.hide-covers .hero-poster:hover img
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.devices { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.devices li { display: flex; gap: 10px; align-items: center; justify-content: space-between; }

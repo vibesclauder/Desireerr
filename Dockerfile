@@ -1,8 +1,10 @@
 # Desireerr in a container. GitHub Actions (.github/workflows/image.yml) publishes it to
 # ghcr.io/vibesclauder/desireerr: latest on a merge to main, dev on a push to dev.
-# Standard library only.
+# Standard library only, but for `cryptography`: Web Push's encryption (requirements.txt).
 FROM python:3.14-slim
 LABEL org.opencontainers.image.source=https://github.com/vibesclauder/desireerr
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY desireerr.py /app/
 COPY web /app/web
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DESIREERR_DATA=/data DESIREERR_CACHE=/cache

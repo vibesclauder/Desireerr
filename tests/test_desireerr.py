@@ -1028,6 +1028,125 @@ class Base(unittest.TestCase):
         self.app.whisparr.index[sid].update(has_file=True, file_added=added, path=path)
 
 
+class WebPushing(Base):
+    """Pushes to devices: what a subscription may be, the encryption, and who hears what."""
+
+    ENDPOINT = "https://fcm.googleapis.com/fcm/send/abc"
+
+    def device(self, endpoint=None):
+        """A browser's side of a subscription: its keys, as the page sends them."""
+        c = d.push_crypto()
+        ec, sr = c["ec"], c["serialization"]
+        key = ec.generate_private_key(ec.SECP256R1())
+        auth = os.urandom(16)
+        pub = key.public_key().public_bytes(sr.Encoding.X962, sr.PublicFormat.UncompressedPoint)
+        return key, auth, {"endpoint": endpoint or self.ENDPOINT,
+                           "keys": {"p256dh": d.b64url(pub), "auth": d.b64url(auth)}}
+
+    def setUp(self):
+        super().setUp()
+        self.web = self.app.notify.web
+        self.sent = []
+        self.web.deliver = lambda sub, data: self.sent.append((sub["user_id"], json.loads(data))) or ""
+        self.app.db.set_settings({"notify_topic": "", "notify_events": "pending,approved,available,failed"})
+
+    def test_subscriptions_only_to_known_push_services(self):
+        _, _, sub = self.device()
+        self.web.subscribe(self.user["id"], dict(sub, label="  My   phone "))
+        self.assertEqual([x["label"] for x in self.web.devices(self.user["id"])], ["My phone"])
+        for bad in ("http://fcm.googleapis.com/x", "https://localhost/x", "https://169.254.169.254/x",
+                    "https://fcm.googleapis.com.evil.example/x", "https://u@fcm.googleapis.com/x",
+                    "https://fcm.googleapis.com:8443/x", "https://[::1/x"):
+            with self.assertRaises(d.ApiError, msg=bad):
+                self.web.subscribe(self.user["id"], dict(sub, endpoint=bad))
+        with self.assertRaises(d.ApiError):
+            self.web.subscribe(self.user["id"], {"endpoint": self.ENDPOINT, "keys": {"p256dh": "x", "auth": "y"}})
+
+    def test_resubscribing_keeps_one_device_and_the_limit_holds(self):
+        _, _, sub = self.device()
+        self.web.subscribe(self.user["id"], sub)
+        self.web.subscribe(self.user["id"], sub)
+        self.assertEqual(len(self.web.devices(self.user["id"])), 1)
+        for i in range(d.PUSH_DEVICES - 1):
+            self.web.subscribe(self.user["id"], self.device(f"https://fcm.googleapis.com/{i}")[2])
+        with self.assertRaises(d.ApiError):
+            self.web.subscribe(self.user["id"], self.device("https://fcm.googleapis.com/more")[2])
+
+    def test_removing_is_for_your_own_devices(self):
+        self.web.subscribe(self.user["id"], self.device()[2])
+        mine = self.web.devices(self.user["id"])[0]["id"]
+        self.web.remove(self.admin["id"], mine)
+        self.assertEqual(len(self.web.devices(self.user["id"])), 1)
+        self.web.remove(self.user["id"], mine)
+        self.assertEqual(self.web.devices(self.user["id"]), [])
+
+    def test_encrypted_the_way_a_browser_decrypts(self):
+        key, auth, sub = self.device()
+        body = self.web.encrypt({"p256dh": sub["keys"]["p256dh"], "auth": sub["keys"]["auth"]}, b'{"title":"Hi"}')
+        c = d.push_crypto()
+        ec, hashes, sr = c["ec"], c["hashes"], c["serialization"]
+        salt, size, idlen = body[:16], int.from_bytes(body[16:20], "big"), body[20]
+        as_public, sealed = body[21:21 + idlen], body[21 + idlen:]
+        self.assertEqual((size, idlen), (4096, 65))
+        ua = key.public_key().public_bytes(sr.Encoding.X962, sr.PublicFormat.UncompressedPoint)
+        shared = key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), as_public))
+        ikm = c["HKDF"](hashes.SHA256(), 32, auth, b"WebPush: info\0" + ua + as_public).derive(shared)
+        cek = c["HKDF"](hashes.SHA256(), 16, salt, b"Content-Encoding: aes128gcm\0").derive(ikm)
+        nonce = c["HKDF"](hashes.SHA256(), 12, salt, b"Content-Encoding: nonce\0").derive(ikm)
+        self.assertEqual(c["AESGCM"](cek).decrypt(nonce, sealed, None), b'{"title":"Hi"}\x02')
+
+    def test_vapid_header_is_signed_by_the_servers_key(self):
+        auth = self.web.vapid(self.ENDPOINT)
+        token, key = auth[len("vapid t="):].split(", k=")
+        self.assertEqual(key, self.web.public_key())
+        head, claims, sig = token.split(".")
+        c = d.push_crypto()
+        ec, hashes, sr = c["ec"], c["hashes"], c["serialization"]
+        raw = d.unb64url(sig)
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+        self.web.private_key().public_key().verify(
+            encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")),
+            f"{head}.{claims}".encode(), ec.ECDSA(hashes.SHA256()))
+        self.assertEqual(json.loads(d.unb64url(claims))["aud"], "https://fcm.googleapis.com")
+        # the key survives a restart: a new object reads the saved one
+        self.assertEqual(d.WebPush(self.app.db).public_key(), self.web.public_key())
+
+    def test_who_hears_what(self):
+        other = self.user_row(self.app.create_user("other", "password1"))
+        for u in (self.admin, self.user, other):
+            self.web.subscribe(u["id"], self.device(f"https://fcm.googleapis.com/{u['id']}")[2])
+        r = self.app.request_scene(self.user, SCENE)           # waiting: the admin hears, the asker doesn't
+        self.assertEqual([u for u, _ in self.sent], [self.admin["id"]])
+        self.assertEqual(self.sent[0][1]["url"], "/requests")
+        self.sent.clear()
+        self.app.approve(self.admin, r["id"])                  # approved: the asker, not the admin who did it
+        self.assertEqual([u for u, _ in self.sent], [self.user["id"]])
+
+    def test_not_discreet_names_the_scene_and_links_to_it(self):
+        self.app.db.set_settings({"notify_discreet": "0"})
+        self.web.subscribe(self.admin["id"], self.device()[2])
+        self.app.request_scene(self.user, SCENE)
+        (_, data), = self.sent
+        self.assertEqual((data["title"], data["url"], data["tag"]), ("New Scene Request", f"/scene/{SCENE}", "request-1"))
+        self.assertIn("A scene", data["body"])
+
+    def test_a_forgotten_device_is_dropped(self):
+        del self.web.deliver
+        self.web.subscribe(self.user["id"], self.device()[2])
+        error = d.urllib.error.HTTPError(self.ENDPOINT, 410, "Gone", {}, None)
+        with unittest.mock.patch.object(d.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(d.ApiError):
+                self.web.test(self.user["id"])
+        self.assertEqual(self.web.devices(self.user["id"]), [])
+
+    def test_stalled_goes_to_admins_and_to_whoever_asked(self):
+        other = self.user_row(self.app.create_user("other", "password1"))
+        rows = [{"user_id": self.user["id"], "id": 1}, {"user_id": other["id"], "id": 2}]
+        got = self.web.stalled_audience(rows)
+        self.assertEqual({u: [r["id"] for r in rs] for u, rs in got.items()},
+                         {self.admin["id"]: [1, 2], self.user["id"]: [1], other["id"]: [2]})
+
+
 class Notifications(Base):
     def test_discreet_by_default(self):
         self.app.db.set_settings({"seen_origin": "http://box:5056", "tab_title": "Notes"})

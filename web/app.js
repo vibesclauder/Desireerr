@@ -1965,6 +1965,65 @@ async function viewSommelier(view, ctx) {
   });
 }
 
+const urlBytes = (text) => Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(text.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "Device";
+  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "browser";
+  return `${os} ${browser}`;
+}
+
+// Settings > Notifications: subscribe this device to Web Push, list and remove devices.
+async function pushSettings(box, ctx) {
+  let info;
+  try { info = await api("push"); } catch (err) { box.textContent = err.message; return; }
+  if (!ctx.alive()) return;
+  const canPush = "serviceWorker" in navigator && "PushManager" in window && window.isSecureContext;
+  let mine = null;
+  if (canPush) {
+    try { mine = await (await navigator.serviceWorker.register("/sw.js")).pushManager.getSubscription(); } catch { /* shown below */ }
+  }
+  const draw = () => {
+    const here = mine && info.devices.find((d) => d.endpoint === mine.endpoint);
+    const note = !info.supported ? "This server can't push to devices: it needs the cryptography package (the Docker image has it)."
+      : !canPush ? "This browser can't receive pushes here. They need HTTPS, and on an iPhone or iPad the app added to the Home Screen."
+      : Notification.permission === "denied" ? "Notifications are blocked for this site in the browser's settings."
+      : "";
+    const list = info.devices.length ? html`<ul class="devices">${info.devices.map((d) => html`<li>${d.label || "Device"}${here && here.id === d.id ? " (this one)" : ""} <button class="btn small ghost" data-del="${d.id}">Remove</button></li>`)}</ul>` : "";
+    const out = html`<div>
+      ${note ? html`<p class="note bad-text">${note}</p>` : ""}
+      <div class="btns">
+        ${info.supported && canPush && Notification.permission !== "denied" ? (here ? html`<button class="btn" id="push-off">Stop on this device</button>` : html`<button class="btn primary" id="push-on">Notify this device</button>`) : ""}
+        ${info.devices.length ? html`<button class="btn ghost" id="push-test">Send a test</button>` : ""}
+      </div>
+      ${list}
+    </div>`;
+    box.innerHTML = out.s;
+    const run = (el, fn) => { if (el) el.onclick = async () => { el.classList.add("busy"); try { await fn(); } catch (err) { toast(err.message, true); } finally { el.classList.remove("busy"); draw(); } }; };
+    run($("#push-on", box), async () => {
+      if (await Notification.requestPermission() !== "granted") throw new Error("Notifications weren't allowed.");
+      const reg = await navigator.serviceWorker.ready;
+      mine = await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBytes(info.key) });
+      info = await api("push", { method: "POST", body: { ...mine.toJSON(), label: deviceName() } });
+      toast("This device gets pushes now.");
+    });
+    run($("#push-off", box), async () => {
+      const id = info.devices.find((d) => d.endpoint === mine.endpoint)?.id;
+      await mine.unsubscribe();
+      mine = null;
+      if (id) info = await api(`push/${id}`, { method: "DELETE" });
+    });
+    run($("#push-test", box), async () => { await api("push/test", { method: "POST" }); toast("Sent. It should arrive in a moment."); });
+    $$("[data-del]", box).forEach((b) => run(b, async () => {
+      const id = Number(b.dataset.del);
+      if (mine && info.devices.find((d) => d.id === id)?.endpoint === mine.endpoint) { await mine.unsubscribe(); mine = null; }
+      info = await api(`push/${id}`, { method: "DELETE" });
+    }));
+  };
+  draw();
+}
+
 async function viewSettings(view, ctx) {
   const parts = [];
   let s = null, users = null;
@@ -1994,6 +2053,11 @@ async function viewSettings(view, ctx) {
     <h2>What you want to see</h2>
     <p class="lede">Other kinds of scene are hidden everywhere: Discover, Scenes, Search, a studio's, tag's or performer's scenes, and what your saved searches request. A scene's kind comes from its performers' genders and StashDB's orientation and group tags; one that can't be told shows.</p>
     ${contentForm()}
+  </section>`;
+  const pushPanel = html`<section class="panel" id="p-push">
+    <h2>Notifications</h2>
+    <p class="lede">Pushes to the devices where you use Desireerr: how your requests go, and for admins, requests waiting for approval. On an iPhone or iPad, add Desireerr to the Home Screen first.</p>
+    <div id="push-box"><p class="note">Checking this device…</p></div>
   </section>`;
   const privacy = html`<section class="panel">
     <h2>On this device</h2>
@@ -2084,7 +2148,7 @@ async function viewSettings(view, ctx) {
   const jump = [["g-you", "Your settings"], ["g-conn", "Connections"], ["g-access", "Users & privacy"]];
   view.innerHTML = html`<div class="page"><div class="page-title"><h1>Settings</h1><span class="sub">Desireerr ${status.version}</span></div>
     ${me.is_admin ? html`<nav class="jump" aria-label="Sections">${jump.map(([id, label]) => html`<button type="button" class="chip" data-jump="${id}">${label}</button>`)}</nav>` : ""}
-    ${group("g-you", "Your settings", "Only for your account and this device.", content, taste, privacy, account)}
+    ${group("g-you", "Your settings", "Only for your account and this device.", content, taste, pushPanel, privacy, account)}
     ${me.is_admin ? html`${group("g-conn", "Connections", "App settings, for admins: where scenes come from and where requests, pushes and Watch buttons go.", conn)}
     ${group("g-access", "Users & privacy", "App settings, for admins: who can sign in and what others see.", access)}` : ""}
   </div>`.s;
@@ -2153,6 +2217,7 @@ async function viewSettings(view, ctx) {
     toast("Password changed. Other devices are signed out.");
   });
   $("#pv-covers", view).onchange = (e) => setCovers(e.target.checked);
+  pushSettings($("#push-box", view), ctx);
   $("#pf-somm", view).onchange = async (e) => {
     try {
       await setSommelier(e.target.checked);

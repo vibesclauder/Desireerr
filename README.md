@@ -10,7 +10,9 @@ Prowlarr and downloads them; each scene shows whether it's pending, requested, d
 or available.
 
 - **One file, standard library only.** `desireerr.py` is the server (Python 3.10+); `web/` is
-  a plain JavaScript single-page app with no build step.
+  a plain JavaScript single-page app with no build step. The one extra: `cryptography`, for
+  pushes to installed devices (`pip install -r requirements.txt`; the Docker image has it).
+  Without it everything else works.
 - **Everything is behind the login.** Covers are fetched through the server and cached, so
   the browser only talks to Desireerr. Covers can be blurred, and the tab title is a setting.
 - **Users and approvals.** Admins approve requests, set favourite studios and change settings. Other users' requests wait for approval unless they're auto-approved.
@@ -72,7 +74,8 @@ or available.
   - Discover's *Performers you might like*: like the ones you loved lately (ten of them), taste
     counting more (times 3), three at most like any one of them, none you have a feeling for or
     follow already.
-- **Pushes, Watch, stalled requests.** ntfy pushes like Seerr's (or discreet ones), a Watch
+- **Pushes, Watch, stalled requests.** Pushes to the devices Desireerr is installed on (Web
+  Push) or through ntfy, like Seerr's (or discreet ones), a Watch
   button that opens downloaded scenes in Jellyfin, and a nudge for requests no release turns
   up for.
 
@@ -243,6 +246,13 @@ approval, one made by a saved search, a scene downloaded, a request failed or st
 - **Discreet** (on to start with): the browser tab title and one line, "A request is ready.",
   with no title, name or cover. Off, they're like Seerr's: what happened, the scene, its
   studio and date, who asked, its cover, and a tap opens the scene.
+- **Web Push**, to the phones and computers where Desireerr is installed: everyone turns it on
+  for a device in Settings, Notifications. It needs HTTPS (a Tailscale name or a reverse
+  proxy), and on an iPhone or iPad the app added to the Home Screen. The same events and the
+  same discreet setting apply. An admin hears of requests waiting for approval and failing;
+  whoever asked hears how their request went, except for what they did themselves. Pushes go
+  only to the browsers' own push services (Google's, Mozilla's, Apple's, Microsoft's), and no
+  cover is sent.
 - Links use Desireerr's address from Settings, or else the one it was last opened at.
 
 ## Watch in Jellyfin
