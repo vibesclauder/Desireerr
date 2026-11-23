@@ -2005,20 +2005,20 @@ async function pushSettings(box, ctx) {
       if (await Notification.requestPermission() !== "granted") throw new Error("Notifications weren't allowed.");
       const reg = await navigator.serviceWorker.ready;
       mine = await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBytes(info.key) });
-      info = await api("push", { method: "POST", body: { ...mine.toJSON(), label: deviceName() } });
+      info = { ...info, ...await api("push", { method: "POST", body: { ...mine.toJSON(), label: deviceName() } }) };
       toast("This device gets pushes now.");
     });
     run($("#push-off", box), async () => {
       const id = info.devices.find((d) => d.endpoint === mine.endpoint)?.id;
       await mine.unsubscribe();
       mine = null;
-      if (id) info = await api(`push/${id}`, { method: "DELETE" });
+      if (id) info = { ...info, ...await api(`push/${id}`, { method: "DELETE" }) };
     });
     run($("#push-test", box), async () => { await api("push/test", { method: "POST" }); toast("Sent. It should arrive in a moment."); });
     $$("[data-del]", box).forEach((b) => run(b, async () => {
       const id = Number(b.dataset.del);
       if (mine && info.devices.find((d) => d.id === id)?.endpoint === mine.endpoint) { await mine.unsubscribe(); mine = null; }
-      info = await api(`push/${id}`, { method: "DELETE" });
+      info = { ...info, ...await api(`push/${id}`, { method: "DELETE" }) };
     }));
   };
   draw();
