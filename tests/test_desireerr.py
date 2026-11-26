@@ -1591,6 +1591,23 @@ class JellyfinLinks(Base):
         self.assertIn("Jellyfin key: keeps the one set in Desireerr", d.init(self.app, jellyfin_key="K3"))
         self.assertEqual(self.app.db.setting("jellyfin_key"), "MINE")
 
+    def test_init_sets_the_watch_addresses_unless_changed_in_settings(self):
+        framed = "https://box/open/jellyfin?at={path}"
+        self.assertIn("Watch button addresses: set",
+                      d.init(self.app, jellyfin_link="https://box:18096/", jellyfin_link_framed=framed))
+        self.assertEqual((self.app.db.setting("jellyfin_link"), self.app.db.setting("jellyfin_link_framed")),
+                         ("https://box:18096", framed))
+        self.assertIn("Watch button addresses: up to date",
+                      d.init(self.app, jellyfin_link="https://box:18096", jellyfin_link_framed=framed))
+        d.init(self.app, jellyfin_link="https://box2:18096", jellyfin_link_framed=framed)  # ours: follows
+        self.assertEqual(self.app.db.setting("jellyfin_link"), "https://box2:18096")
+        self.app.save_settings({"jellyfin_link": "https://mine:8920"})  # set in Settings by hand
+        self.assertIn("Watch button addresses: keeps the ones set in Desireerr",
+                      d.init(self.app, jellyfin_link="https://box3:18096", jellyfin_link_framed=framed))
+        self.assertEqual(self.app.db.setting("jellyfin_link"), "https://mine:8920")
+        with self.assertRaises(d.ApiError):
+            d.init(self.app, jellyfin_link_framed="box/open?at={path}")
+
 
 class SettingsChecks(Base):
     def test_addresses_and_topics_are_checked(self):
@@ -1603,6 +1620,19 @@ class SettingsChecks(Base):
                                       "notify_discreet": False, "stall_days": "500"})
         self.assertEqual((out["app_url"], out["notify_events"], out["notify_discreet"], out["stall_days"]),
                          ("https://x.example", ["available"], False, 365))
+
+    def test_watch_addresses(self):
+        self.app.whisparr.routes[("GET", "qualityprofile")] = []
+        out = self.app.save_settings({"jellyfin_link": "https://jf.example:8920/", "jellyfin_new_tab": False,
+                                      "jellyfin_link_framed": " https://box.example/open/jellyfin?at={path} "})
+        self.assertEqual((out["jellyfin_link"], out["jellyfin_link_framed"], out["jellyfin_new_tab"]),
+                         ("https://jf.example:8920", "https://box.example/open/jellyfin?at={path}", False))
+        self.assertEqual(self.app.save_settings({"jellyfin_link": "https://box.example/#/go?to={path}"})
+                         ["jellyfin_link"], "https://box.example/#/go?to={path}")
+        for bad in ("https://box.example?at=x", "https://{path}", "javascript:{path}",
+                    "https://box.example/?at={path} x", "box.example/?at={path}"):
+            with self.assertRaises(d.ApiError, msg=bad):
+                self.app.save_settings({"jellyfin_link_framed": bad})
 
     def test_old_databases_get_the_new_columns(self):
         path = Path(self.tmp.name) / "old.db"

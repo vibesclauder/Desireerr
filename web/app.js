@@ -560,17 +560,22 @@ function stateDot(st) {
 }
 const canRequest = (st) => ["none", "declined", "failed", "abandoned"].includes(st?.status || "none");
 
-// Jellyfin's page for a downloaded scene: at the address set in Settings, or on the host
-// Desireerr is opened at, on Jellyfin's port.
-function watchUrl(st) {
+// Jellyfin's page for a downloaded scene, and where it opens. Inside another page's frame (a
+// dashboard's), at the address set for that, over that whole page; else at the address set in
+// Settings, or on the host Desireerr is opened at, on Jellyfin's port, in a new tab or this
+// one. {path} in an address takes Jellyfin's page, encoded; without it the page goes on the end.
+function watchLink(st) {
   const j = status.jellyfin;
-  if (!j || !st?.jellyfin_id) return "";
-  const base = j.link || `${location.protocol}//${location.hostname}:8096`;
-  return `${base}/web/#/details?id=${encodeURIComponent(st.jellyfin_id)}&serverId=${encodeURIComponent(j.server_id)}`;
+  if (!j || !st?.jellyfin_id) return null;
+  const page = `/web/#/details?id=${encodeURIComponent(st.jellyfin_id)}&serverId=${encodeURIComponent(j.server_id)}`;
+  const framed = window.top !== window.self && j.link_framed;
+  const base = (framed ? j.link_framed : j.link) || `${location.protocol}//${location.hostname}:8096`;
+  const url = base.includes("{path}") ? base.replaceAll("{path}", encodeURIComponent(page)) : base + page;
+  return { url, target: framed || !j.new_tab ? "_top" : "_blank" };
 }
 const watchButton = (st, cls = "") => {
-  const url = watchUrl(st);
-  return url ? html`<a class="btn ok ${cls}" href="${url}" target="_blank" rel="noreferrer">${icon("play")}Watch</a>` : "";
+  const link = watchLink(st);
+  return link ? html`<a class="btn ok ${cls}" href="${link.url}" target="${link.target}" rel="noreferrer">${icon("play")}Watch</a>` : "";
 };
 // The requester and admins can search again for a stalled request, or give up on it.
 const mayNudge = (r) => r && r.stalled_days && (me.is_admin || r.user_id === me.id);
@@ -2109,6 +2114,9 @@ async function viewSettings(view, ctx) {
         <label class="field"><span>Address (from this server)</span><input class="input" name="jellyfin_url" value="${s.jellyfin_url}" placeholder="http://localhost:8096"></label>
         <label class="field"><span>API key</span><input class="input" name="jellyfin_key" type="password" autocomplete="off" placeholder="${s.jellyfin_key_set ? "Saved. Paste a new one to replace it." : "Jellyfin: Dashboard, API Keys"}"></label>
         <label class="field" style="grid-column:1/-1"><span>Address for the Watch button (from your browser)</span><input class="input" name="jellyfin_link" value="${s.jellyfin_link}" placeholder="${location.protocol}//${location.hostname}:8096"></label>
+        <label class="check" style="grid-column:1/-1"><input type="checkbox" name="jellyfin_new_tab" ${s.jellyfin_new_tab ? "checked" : ""}> Watch opens a new tab. Without it, Jellyfin opens in this one.</label>
+        <label class="field" style="grid-column:1/-1"><span>Address for the Watch button when Desireerr is shown inside another page (a dashboard's frame)</span><input class="input" name="jellyfin_link_framed" value="${s.jellyfin_link_framed}" placeholder="Empty: the one above"></label>
+        <p class="note" style="grid-column:1/-1;margin:0">Inside a frame, Jellyfin opens over the whole page. Either address may hold <code>{path}</code>, which becomes Jellyfin's page for the scene, encoded: for a dashboard that shows Jellyfin under its own bar, say <code>https://dashboard.example/open/jellyfin?at={path}</code>. Without it, the page goes on the end of the address.</p>
         <label class="check" style="grid-column:1/-1"><input type="checkbox" name="write_nfo" ${s.write_nfo ? "checked" : ""}> Write the downloaded scenes' .nfo files and covers (folder.jpg) from StashDB: the performers as the cast, with their photos, and the studio, tags and description. Whisparr's own metadata is turned off meanwhile, and back on without this.</label>
         <div class="btns"><button class="btn primary">Save</button>${s.jellyfin_key_set && !s.jellyfin_error ? html`<span class="note ok-text">Connected: Jellyfin has ${s.jellyfin_videos} videos.</span>` : ""}</div>
       </form>
@@ -2193,7 +2201,8 @@ async function viewSettings(view, ctx) {
     catch (err) { toast(err.message, true); } finally { b.classList.remove("busy"); }
   };
   submit("#jf-form", async (form) => {
-    const body = { jellyfin_url: form.jellyfin_url.value, jellyfin_link: form.jellyfin_link.value, write_nfo: form.write_nfo.checked };
+    const body = { jellyfin_url: form.jellyfin_url.value, jellyfin_link: form.jellyfin_link.value, jellyfin_link_framed: form.jellyfin_link_framed.value,
+      jellyfin_new_tab: form.jellyfin_new_tab.checked, write_nfo: form.write_nfo.checked };
     if (form.jellyfin_key.value.trim()) body.jellyfin_key = form.jellyfin_key.value.trim();
     const res = await api("settings", { method: "PUT", body });
     toast(res.jellyfin_error ? `Saved, but: ${res.jellyfin_error}` : "Saved.", !!res.jellyfin_error);

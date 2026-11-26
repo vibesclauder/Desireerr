@@ -114,8 +114,9 @@ DESIREERR_ADMIN_USER=alice DESIREERR_ADMIN_PASSWORD=... DESIREERR_STASHDB_KEY=..
 
 Run again with a new password, it updates that admin. An admin made on the first-visit page
 and a key changed in Settings are left alone. `DESIREERR_JELLYFIN_KEY` sets a Jellyfin API
-key the same way (a new one given later replaces it, unless one was set in Settings), and
-`DESIREERR_NTFY_SERVER` (https://ntfy.sh if not given) with `DESIREERR_NTFY_TOPIC` the ntfy
+key the same way (a new one given later replaces it, unless one was set in Settings),
+`DESIREERR_JELLYFIN_LINK` and `DESIREERR_JELLYFIN_LINK_FRAMED` the Watch button's two addresses
+(see [Watch in Jellyfin](#watch-in-jellyfin)), and `DESIREERR_NTFY_SERVER` (https://ntfy.sh if not given) with `DESIREERR_NTFY_TOPIC` the ntfy
 topic for its pushes.
 
 **Whisparr.** Its address is `http://localhost:6969` unless set in Settings. Its API key, if
@@ -261,6 +262,18 @@ With a Jellyfin API key (Settings, Jellyfin; or `init`'s `DESIREERR_JELLYFIN_KEY
 scenes get a **Watch** button on their page and in Requests. It finds the scene in Jellyfin
 by its file (Whisparr's path, or the file name if the two see different folders) and opens
 it at Jellyfin's address: the one in Settings, or the host Desireerr is opened at, port 8096.
+By default it opens a new tab; untick that in Settings to open Jellyfin in the same one.
+
+**Inside a dashboard.** Shown in another page's frame (a dashboard that embeds its apps, see
+[Framing](#install)), Desireerr uses the second address in Settings if there is one, and opens
+it over the whole page, so you don't end up with Jellyfin squeezed into Desireerr's frame.
+Either address may hold `{path}`, which becomes Jellyfin's page for the scene, URL-encoded
+(`/web/#/details?id=…`); without it, that page goes on the end of the address. For a dashboard
+that shows Jellyfin under its own bar and takes the page to open as a parameter:
+
+```
+https://dashboard.example/open/jellyfin?at={path}
+```
 
 ### Scene details in Jellyfin (.nfo files and covers)
 

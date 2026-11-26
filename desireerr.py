@@ -179,6 +179,8 @@ DEFAULT_SETTINGS = {
     "jellyfin_url": DEFAULT_JELLYFIN,
     "jellyfin_key": "",
     "jellyfin_link": "",         # Jellyfin's address for the browser; empty: our host, :8096
+    "jellyfin_link_framed": "",  # the same inside another page's frame; empty: jellyfin_link
+    "jellyfin_new_tab": "1",     # the Watch button opens a new tab (not inside a frame)
     "write_nfo": "1",            # downloaded scenes' .nfo from StashDB, not from Whisparr
     "whisparr_nfo_off": "0",     # we turned Whisparr's .nfo writing off (and turn it back on)
 }
@@ -3367,6 +3369,8 @@ class App:
             "jellyfin_url": s["jellyfin_url"],
             "jellyfin_key_set": bool(s["jellyfin_key"]),
             "jellyfin_link": s["jellyfin_link"],
+            "jellyfin_link_framed": s["jellyfin_link_framed"],
+            "jellyfin_new_tab": s["jellyfin_new_tab"] == "1",
             "write_nfo": s["write_nfo"] == "1",
             "nfo_error": self.nfo_error,
         }
@@ -3409,9 +3413,14 @@ class App:
             allowed["stall_days"] = str(clamp_int(body["stall_days"], 7, 1, 365))
         if "tab_title" in body:
             allowed["tab_title"] = (str(body["tab_title"]).strip() or "Desireerr")[:40]
-        for key in ("notify_server", "app_url", "jellyfin_link"):
+        for key in ("notify_server", "app_url"):
             if key in body:
                 allowed[key] = web_address(body[key])
+        for key in ("jellyfin_link", "jellyfin_link_framed"):
+            if key in body:
+                allowed[key] = watch_address(body[key])
+        if "jellyfin_new_tab" in body:
+            allowed["jellyfin_new_tab"] = "1" if body["jellyfin_new_tab"] else "0"
         if "jellyfin_url" in body:
             allowed["jellyfin_url"] = web_address(body["jellyfin_url"]) or DEFAULT_JELLYFIN
         if "notify_topic" in body:
@@ -3731,7 +3740,9 @@ class Handler(BaseHTTPRequestHandler):
                 app.jellyfin.ensure()
                 if app.jellyfin.creds()[1] and app.jellyfin.server_id:
                     out["jellyfin"] = {"server_id": app.jellyfin.server_id,
-                                       "link": app.db.setting("jellyfin_link")}
+                                       "link": app.db.setting("jellyfin_link"),
+                                       "link_framed": app.db.setting("jellyfin_link_framed"),
+                                       "new_tab": app.db.setting("jellyfin_new_tab") == "1"}
             return 200, out, None
         if key == ("POST", "setup"):
             if not app.setup_needed():
@@ -3990,6 +4001,18 @@ def web_address(value):
     return url
 
 
+def watch_address(value):
+    """An address for the Watch button: a web address, Jellyfin's page for the scene goes on
+    its end; or one with {path} after the host, which takes that page, encoded (a dashboard's
+    page that frames Jellyfin, say: https://dashboard.example/open/jellyfin?at={path})."""
+    url = str(value or "").strip()
+    if "{path}" not in url:
+        return web_address(url)
+    if not re.fullmatch(r"https?://[^\s/?#{}]+[/?#][^\s]*", url):
+        raise ApiError(400, f"{url} isn't a web address (http://... or https://...).")
+    return url
+
+
 def html_escape(s):
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             .replace('"', "&quot;"))
@@ -4072,14 +4095,16 @@ def tag_counter(app):
         time.sleep(3600)
 
 
-def init(app, user="", password="", stashdb_key="", jellyfin_key="", ntfy_server="", ntfy_topic=""):
-    """Set up the admin, the StashDB key, a Jellyfin API key and an ntfy topic from outside,
-    e.g. from the setup script of the server it runs on.
+def init(app, user="", password="", stashdb_key="", jellyfin_key="", ntfy_server="", ntfy_topic="",
+         jellyfin_link="", jellyfin_link_framed=""):
+    """Set up the admin, the StashDB key, a Jellyfin API key, the Watch button's addresses and
+    an ntfy topic from outside, e.g. from the setup script of the server it runs on.
 
     The admin gets a login shared with other apps; a salted hash of it is kept, so a later
     run can tell whether that login changed (then the admin follows it) without storing it.
-    An admin made on the first visit and a key set in Settings are never overwritten; a
-    Jellyfin key or ntfy topic given here before is replaced by a new one.
+    An admin made on the first visit and a key or address set in Settings are never
+    overwritten; a Jellyfin key, Watch address or ntfy topic given here before is replaced by
+    a new one.
     Returns what was done, one line each.
     """
     db, done = app.db, []
@@ -4135,6 +4160,18 @@ def init(app, user="", password="", stashdb_key="", jellyfin_key="", ntfy_server
             done.append("Jellyfin key: set (available scenes get a Watch button)")
         else:
             done.append("Jellyfin key: keeps the one set in Desireerr")
+    if jellyfin_link or jellyfin_link_framed:
+        given = {"jellyfin_link": watch_address(jellyfin_link),
+                 "jellyfin_link_framed": watch_address(jellyfin_link_framed)}
+        saved = {key: db.setting(key) for key in given}
+        managed = json.loads(db.setting("watch_links_managed") or "null")
+        if saved == given:
+            done.append("Watch button addresses: up to date")
+        elif not any(saved.values()) or saved == managed:
+            db.set_settings(dict(given, watch_links_managed=json.dumps(given)))
+            done.append("Watch button addresses: set")
+        else:
+            done.append("Watch button addresses: keeps the ones set in Desireerr")
     if ntfy_topic:
         given = {"server": (ntfy_server or "https://ntfy.sh").rstrip("/"), "topic": ntfy_topic}
         saved = {"server": db.setting("notify_server"), "topic": db.setting("notify_topic")}
@@ -4156,8 +4193,9 @@ def cmd_init(argv):
     p = argparse.ArgumentParser(prog="desireerr.py init", description=(
         "Set up the admin and the StashDB key without the first-visit page. The secrets come "
         "from the environment: DESIREERR_ADMIN_USER, DESIREERR_ADMIN_PASSWORD, "
-        "DESIREERR_STASHDB_KEY, DESIREERR_JELLYFIN_KEY, DESIREERR_NTFY_SERVER and "
-        "DESIREERR_NTFY_TOPIC (each optional)."))
+        "DESIREERR_STASHDB_KEY, DESIREERR_JELLYFIN_KEY, DESIREERR_JELLYFIN_LINK, "
+        "DESIREERR_JELLYFIN_LINK_FRAMED, DESIREERR_NTFY_SERVER and DESIREERR_NTFY_TOPIC (each "
+        "optional)."))
     p.add_argument("--data", default=os.environ.get(
         "DESIREERR_DATA", Path.home() / ".local/state/desireerr"))
     args = p.parse_args(argv)
@@ -4168,7 +4206,9 @@ def cmd_init(argv):
                     os.environ.get("DESIREERR_STASHDB_KEY", "").strip(),
                     os.environ.get("DESIREERR_JELLYFIN_KEY", "").strip(),
                     os.environ.get("DESIREERR_NTFY_SERVER", "").strip(),
-                    os.environ.get("DESIREERR_NTFY_TOPIC", "").strip())
+                    os.environ.get("DESIREERR_NTFY_TOPIC", "").strip(),
+                    os.environ.get("DESIREERR_JELLYFIN_LINK", "").strip(),
+                    os.environ.get("DESIREERR_JELLYFIN_LINK_FRAMED", "").strip())
     except ApiError as e:
         print(f"desireerr init: {e.message}", file=sys.stderr)
         return 1
